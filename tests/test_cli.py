@@ -109,3 +109,56 @@ def test_status_when_stopped_shows_saved_time_and_burst_progress(project):
 def test_audit_explains_when_nothing_is_recorded_yet(project):
     result = runner.invoke(agent_app, ["audit"])
     assert result.exit_code == 1 and "Nothing has been recorded yet" in result.output
+
+
+def _live_run(project, *, tamper: bool = False):
+    """Record real transactions and make live verdicts the way the engine does."""
+    from agent.daemon.live_state import VERDICT_COLUMNS, VERDICT_TABLE, LiveSignals
+    from agent.features.token_state import CreatorIndex
+    from agent.ingest.pipeline import Pipeline
+    from agent.ingest.recorder import ParquetSink
+    from agent.models.rules import parse_rules
+    from helpers import fixture_names, live
+
+    data = project / "data"
+    rules = parse_rules({"caution": [{"feature": "snipers", "at_least": 1, "reason": "x"}]})
+    signals = LiveSignals(rules, "t", CreatorIndex(), [])
+    pipeline = Pipeline(data, data / "run", on_row=signals.add)
+    for name in fixture_names():
+        if name.startswith("pump-"):
+            pipeline.handle(live(name))
+    pipeline.flush()
+    sink = ParquetSink(data / "live", {VERDICT_TABLE: VERDICT_COLUMNS}, prefix="verdict")
+    for verdict in signals.due(10**12):
+        if tamper:
+            verdict["snapshot"] = {**verdict["snapshot"], "holders": 999}
+        sink.add(VERDICT_TABLE, verdict)
+    sink.flush()
+
+
+def test_check_live_finds_live_and_replayed_signals_identical(project):
+    _live_run(project)
+    result = runner.invoke(agent_app, ["check-live", "--hours", "1"])
+    assert result.exit_code == 0, result.output
+    assert "identical: 12 (100.00%)" in result.output and "different: 0" in result.output
+
+
+def test_check_live_reports_a_difference(project):
+    _live_run(project, tamper=True)
+    result = runner.invoke(agent_app, ["check-live", "--hours", "1"])
+    assert result.exit_code == 1
+    assert "different: 12" in result.output and "holders (12)" in result.output
+
+
+def test_alerts_shows_the_newest_alert_lines(project):
+    files = RunFiles(project / "data" / "run")
+    files.run_dir.mkdir(parents=True)
+    result = runner.invoke(agentd_app, ["alerts"])
+    assert result.exit_code == 1 and "No alerts yet" in result.output
+    (files.run_dir / "alerts.log").write_text(
+        "".join(f"12:00:0{i}  MINT{i}  $X  T+60s  PASS  no rule fired\n" for i in range(5)),
+        encoding="utf-8",
+    )
+    result = runner.invoke(agentd_app, ["alerts", "--last", "2"])
+    assert result.exit_code == 0
+    assert [ln.split("  ")[1] for ln in result.output.splitlines()] == ["MINT3", "MINT4"]

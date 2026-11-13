@@ -28,8 +28,10 @@ copy .env.example .env      # then edit .env (all values are optional for now)
 
 ```powershell
 .venv\Scripts\agentd start --foreground   # record and print live events; Ctrl+C to stop
+.venv\Scripts\agentd start --foreground --show alerts   # ...or print only tokens that pass
 .venv\Scripts\agentd start                # record in the background
-.venv\Scripts\agentd status               # running? for how long? progress, gaps, disk
+.venv\Scripts\agentd status               # running? feeds, uptime, verdicts, gaps, disk
+.venv\Scripts\agentd alerts --follow      # tokens that pass the rules, mint first; Ctrl+C
 .venv\Scripts\agentd pause-recording      # keep running but stop writing (logged as a gap)
 .venv\Scripts\agentd resume-recording
 .venv\Scripts\agentd stop                 # writes what is buffered, then exits
@@ -41,25 +43,28 @@ you can close the PowerShell window, and Claude, and it keeps recording. It prin
 instead, Windows refused, and closing the window may stop the engine.
 
 The PC must stay awake while the engine runs: Settings > System > Power > Sleep: Never.
-The live feed uses about 20-35 GB of network data per day.
+The engine keeps two connections to Solana's free public feed open at once
+(`live.sources` in `config/settings.yaml`), so a drop on one is covered by the other.
+Together they use about 130 GB of network data per day.
 
-Three lines of `agentd status` tell you where a recording stands:
+A few lines of `agentd status` tell you how the recording is going:
 
 ```
-running:   15 m 08 s, since 04:46 today            this run of the engine
-saved:     54 m 09 s recorded out of 58 m 04 s since 04:03 today; 3 gaps, 3 m 55 s off
-burst:     [#-----------------------------]   4% of 24 h; 23 h 05 m to go, done about 04:07 tomorrow
+feed 1:    solana-public, connected, last message 0.1s ago, 4.2s behind, first for 58%, 12 drops
+feed 2:    solana-public-legacy, connected, last message 0.0s ago, 3.9s behind, first for 42%, 9 drops
+saved:     21 h 40 m recorded out of 22 h 05 m since 06:10 today; 14 gaps, 25 m off
+uptime:    98.1% of the last 24 h recorded; meets the 95% target
+verdicts:  9,120 made (avoid 4,010, caution 5,090, pass 20); 31 with gaps; 410 tokens tracked; ...
 ```
 
-The bar counts recorded time toward one burst (`goal_hours` in `config/settings.yaml`,
-24 by default). Restarts and short breaks count toward the same burst; a break longer
-than an hour starts a new one. At 100% it says to run the audit and then stop.
+- `feed N`: one line per connection. "behind" is how late its events arrive; "first" is
+  how often it delivered a transaction before the other one did.
+- `uptime`: the share of the last 24 hours with no gap (spec 15.1 asks for 95%). A gap
+  is time no connection covered; one connection dropping while the other runs is not one.
+- `verdicts`: see "Live verdicts" below.
 
-A fourth line, `history:`, shows progress toward all the history needed for a first model
-(`dataset.target_days`, 28 days by default): days done and to go, and GB downloaded out of
-the estimated total. The total assumes the missing days come from the backfill archive at
-`dataset.backfill_gb_per_day` (310 GB, estimated from the archive's file sizes until the
-Phase 3 pilot measures it). Downloads are counted across runs in `run/downloads.jsonl`.
+The engine records continuously (`recorder.goal_hours: 0`). With `goal_hours` above 0 it
+also shows a `burst:` bar toward a recording of that many hours.
 
 Pause or stop?
 
@@ -101,6 +106,38 @@ trade. The engine also saves a settings snapshot at start-up and every 6 hours
 (`data/config_snapshots/`); fee rates and curve parameters come from those snapshots or
 from the trades themselves, never from the code.
 
+## Live verdicts
+
+While it records, the engine judges every new token 30, 60, 120 and 300 seconds after its
+launch with the rules in `config/rules.yaml` (avoid / caution / pass, with reasons). A
+verdict waits until the data up to that moment has arrived, so when the feed runs late
+the verdict comes late too (`agentd status` shows the median delay). Tokens that pass go
+to `run/alerts.log`; `agentd alerts --follow` shows them as they come. Edits to
+`config/rules.yaml` are picked up within 10 seconds.
+
+Every verdict, with all the signals it saw, is saved in `live/verdicts/`. To check that
+the live signals match a replay of the recorded data (they must be identical):
+
+```powershell
+.venv\Scripts\agent check-live --hours 2
+```
+
+The rules are starting guesses, not advice: tokens that pass are not yet known to do
+better than any others.
+
+## Signals and rules (first version)
+
+```powershell
+.venv\Scripts\agent signals --hours 8 --at 60   # judge recorded tokens 60 s after launch
+```
+
+Replays recorded tokens through the same signals the engine will use live (holders, dev
+buys and sells, snipers, buy/sell flow, curve progress, mayhem share) and through the
+hand-written rules in `config/rules.yaml`, then shows each verdict (avoid / caution /
+pass, with reasons) and how often tokens with each verdict died or graduated. The rules
+are starting guesses to be tested, not advice. Signals only use events up to the moment
+they describe.
+
 ## History from the archive (backfill)
 
 Old Faithful (`files.old-faithful.net`) keeps every Solana block, one file per epoch
@@ -134,12 +171,13 @@ Everything is under `DATA_DIR` from `.env` (default: `./data`):
 
 ```
 raw/<table>/date=YYYY-MM-DD/part-*.parquet   recorded events, one folder per UTC day
+live/verdicts/date=YYYY-MM-DD/verdict-*.parquet  the engine's verdicts, with their signals
 raw_backfill/<table>/date=YYYY-MM-DD/e*.parquet  the same tables from the archive
 gaps/gap-*.parquet                           every period when recording was off or unreliable
 backfill/epoch-<E>/                          archive index, progress and report per epoch
 backfill/gaps/epoch-<E>.parquet              archive pieces that could not be read
 audits/audit-*.json                          audit results
-run/                                         engine log, status and state files
+run/                                         engine log, status, alerts and state files
 ```
 
 Tables: `tokens` (creates), `trades` (bonding-curve buys and sells), `curve_completes`,
@@ -160,4 +198,6 @@ SELECT date, count(*) FROM read_parquet('D:/memecoin-agent-data/raw/trades/*/*.p
 Phases 0-2: the engine records live pump.fun events to Parquet with a gap log, `agent
 audit` measures what was missed, and the curve math reproduces every recorded trade.
 Phase 3: `agent backfill` reads history from the archive and `agent parity` checks it
-against the recording. Models come later; see [docs/PROGRESS.md](docs/PROGRESS.md).
+against the recording. Fast path steps B and C: two live connections, continuous
+recording, and live rule verdicts for every new token. Models come later; see
+[docs/PROGRESS.md](docs/PROGRESS.md).

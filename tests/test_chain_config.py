@@ -153,12 +153,18 @@ def test_engine_saves_a_snapshot_at_start_and_on_schedule(tmp_path, monkeypatch)
     async def scenario():
         stop = asyncio.Event()
         task = asyncio.create_task(engine._snapshot_loop(cfg, stop, []))
-        await asyncio.sleep(2.5)  # every 0.0005 h = 1.8 s: a snapshot at start, one more
+        # Every 0.0005 h = 1.8 s: a snapshot at start, then one more. Wait for the second
+        # rather than a fixed time (a busy PC can take a while to start the first).
+        for _ in range(100):
+            if len(calls) >= 2:
+                break
+            await asyncio.sleep(0.1)
         stop.set()
         await asyncio.wait_for(task, timeout=5)
 
     asyncio.run(scenario())
     assert len(calls) == 2
+    assert calls[1] - calls[0] >= 1.7  # on the schedule, not straight away
     assert len(load_snapshots(cfg.data_dir)) == 2
 
 

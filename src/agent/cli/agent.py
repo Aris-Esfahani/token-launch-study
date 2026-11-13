@@ -404,3 +404,153 @@ def parity(
     typer.echo(f"Details saved to: {saved}")
     typer.echo(f"Result: {'PASS' if result.passed else 'NOT PASSED'}")
     raise typer.Exit(0 if result.passed else 1)
+
+
+@app.command()
+def signals(
+    hours: Annotated[float, typer.Option(help="Tokens created in this many recent hours.")] = 2.0,
+    at: Annotated[int, typer.Option(help="Seconds after creation to judge each token.")] = 60,
+    show: Annotated[int, typer.Option(help="List this many of the newest tokens.")] = 15,
+) -> None:
+    """Replay recorded tokens through the live signals and the rules (config/rules.yaml),
+    and show the verdicts, plus how often tokens with each verdict died or graduated."""
+    # Imported here so this command's code is not loaded by other commands (the backfill's
+    # worker processes import this module).
+    from collections import Counter
+
+    from agent.features.replay import OUTCOME_WINDOW_S, load_states, outcomes, snapshots
+    from agent.models.rules import LEVELS, PASS, RulesError, judge, load_rules
+
+    cfg = load_config()
+    try:
+        rules = load_rules(cfg.root / "config" / "rules.yaml")
+    except (OSError, RulesError) as exc:
+        typer.echo(f"Could not read the rules: {exc}")
+        raise typer.Exit(1) from None
+    span = recorded_span(cfg.data_dir / "raw")
+    if span is None:
+        typer.echo("Nothing has been recorded yet. Run `agentd start` first.")
+        raise typer.Exit(1)
+    end = int(span[1]) - at
+    start = int(max(span[0], end - hours * 3600))
+    replay = load_states(cfg.data_dir, start, end, max_offset_s=at, after_s=OUTCOME_WINDOW_S)
+    rows = snapshots(replay, (at,))
+    clean = [r for r in rows if not r["has_gap"]]
+    try:
+        verdicts = {r["mint"]: judge(r, rules) for r in clean}
+    except RulesError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from None
+    levels = (*LEVELS, PASS)
+    local = lambda ts: datetime.fromtimestamp(ts).strftime("%H:%M")  # noqa: E731
+    typer.echo(f"Tokens created {local(start)}-{local(end)} ({(end - start) / 3600:.1f} h): "
+               f"{len(replay.states):,}; judged at {at} s after creation: {len(clean):,} "
+               f"({len(rows) - len(clean):,} more left out: a recording gap touched them)")
+    if not clean:
+        return
+    typer.echo("")
+    for level in levels:
+        group = [v for v in verdicts.values() if v.level == level]
+        reasons = Counter(v.fired[0].summary for v in group if v.fired)
+        top = "; ".join(f"{r} ({n:,})" for r, n in reasons.most_common(3))
+        typer.echo(f"  {level:8s}{len(group):>7,} ({len(group) / len(clean):>4.0%})"
+                   f"{'   most often: ' + top if top else ''}")  # fmt: skip
+
+    later = outcomes(replay)
+    judged = {m: o for m, o in later.items() if m in verdicts}
+    typer.echo("")
+    if judged:
+        typer.echo(f"What happened next, for the {len(judged):,} tokens whose first hour was "
+                   "recorded (gaps under 10% of it):")  # fmt: skip
+        typer.echo(f"  {'':8s}{'tokens':>8s}{'dead at 30 min':>17s}{'graduated in 1 h':>19s}")
+        for level in levels:
+            group = [o for m, o in judged.items() if verdicts[m].level == level]
+            if group:
+                dead = sum(o["is_dead"] for o in group) / len(group)
+                grad = sum(o["graduated_1h"] for o in group) / len(group)
+                typer.echo(f"  {level:8s}{len(group):>8,}{dead:>17.0%}{grad:>19.1%}")
+        typer.echo("  (Rules are starting guesses; this is the first check of how they sort.)")
+    else:
+        typer.echo("No token's first hour is fully recorded yet; outcomes come later.")
+
+    typer.echo("")
+    typer.echo(f"Newest {min(show, len(clean))} (mint first, as Padre's search wants it):")
+    for r in sorted(clean, key=lambda r: r["cutoff_ts"], reverse=True)[:show]:
+        v = verdicts[r["mint"]]
+        mcap = f"{r['market_cap_sol']:.0f} SOL" if r["market_cap_sol"] is not None else "-"
+        typer.echo(f"  {r['mint']}  {v.level:7s} {local(r['cutoff_ts'] - at)}  "
+                   f"buyers {r['unique_buyers']:>3}  top10 {r['top10_hold_pct']:>3.0f}%  "
+                   f"dev {r['dev_hold_pct']:>3.0f}%  snipers {r['sniper_hold_pct']:>3.0f}%  "
+                   f"mcap {mcap}")  # fmt: skip
+        if v.reasons:
+            typer.echo(f"      {'; '.join(v.reasons)}")
+
+
+@app.command("check-live")
+def check_live(
+    hours: Annotated[float, typer.Option(help="Verdicts made in this many recent hours.")] = 2.0,
+    show: Annotated[int, typer.Option(help="List this many differences.")] = 5,
+) -> None:
+    """Check the engine's live verdicts against a replay of the recorded data (spec 15.0
+    step C): each token's signals at each cutoff must be identical."""
+    # Imported here so this command's code is not loaded by other commands (the backfill's
+    # worker processes import this module).
+    from collections import Counter
+
+    import duckdb
+
+    from agent.features.replay import load_states
+
+    cfg = load_config()
+    folder = cfg.data_dir / "live" / "verdicts"
+    if not any(folder.glob("*/*.parquet")):
+        typer.echo("No live verdicts yet. They come from `agentd start` with config/rules.yaml.")
+        raise typer.Exit(1)
+    since = time.time() - hours * 3600
+    with duckdb.connect() as db:
+        cursor = db.execute(
+            "SELECT mint, ts, created_ts, offset_s, has_gap, snapshot FROM read_parquet(?, "
+            "union_by_name=true) WHERE decided_at >= ? ORDER BY ts",
+            [f"{folder.as_posix()}/*/*.parquet", since],
+        )
+        verdicts = cursor.fetchall()
+    if not verdicts:
+        typer.echo(f"No live verdicts in the last {hours:g} h.")
+        raise typer.Exit(1)
+    created = [v[2] for v in verdicts]
+    replay = load_states(cfg.data_dir, min(created), max(created) + 1,
+                         max_offset_s=max(v[3] for v in verdicts))  # fmt: skip
+    states = {s.mint: s for s in replay.states}
+    same, differ, missing, gap_flags = 0, [], 0, 0
+    keys: Counter = Counter()
+    for mint, ts, _, offset, has_gap, snapshot in verdicts:
+        state = states.get(mint)
+        if state is None:
+            missing += 1
+            continue
+        live = json.loads(snapshot)
+        replayed = state.snapshot(ts, creators=replay.creators)
+        if has_gap != replay.has_gap(state, ts):
+            gap_flags += 1
+        if live == replayed:
+            same += 1
+            continue
+        changed = sorted(k for k in replayed if live.get(k) != replayed[k])
+        keys.update(changed)
+        differ.append((mint, offset, changed))
+    checked = same + len(differ)
+    typer.echo(f"Live verdicts in the last {hours:g} h: {len(verdicts):,}; checked against a "
+               f"replay: {checked:,}")  # fmt: skip
+    typer.echo(f"  identical: {same:,} ({same / checked:.2%})" if checked else "  identical: -")
+    typer.echo(f"  different: {len(differ):,}")
+    if missing:
+        typer.echo(f"  token not in the recorded tokens: {missing:,}")
+    if gap_flags:
+        typer.echo(f"  gap flag differs: {gap_flags:,} (a gap logged after the verdict was made)")
+    if keys:
+        typer.echo("  signals that differ most often: "
+                   + ", ".join(f"{k} ({n:,})" for k, n in keys.most_common(6)))  # fmt: skip
+        for mint, offset, changed in differ[:show]:
+            typer.echo(f"    {mint}  T+{offset}s: {', '.join(changed)}")
+    if differ:
+        raise typer.Exit(1)

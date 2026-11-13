@@ -10,23 +10,45 @@ live:
   # Which programs (keys from `programs` above) to follow live.
   subscribe: [pump]
 
-  # Live sources, tried in this order. If one fails or goes quiet, the next is used.
-  # ${NAME} is filled in from .env. A source whose value is missing is skipped.
+  # Live sources. Connections with different numbers run at the same time (spec 15.0
+  # step B): a transaction both deliver is recorded once, and a gap is logged only for
+  # time no connection covered. Sources with the same number are tried in turn for that
+  # connection when one fails. ${NAME} is filled in from .env; a source whose value is
+  # missing is skipped.
+  #
+  # Both connections use Solana's free public server, starting on different addresses.
+  # Checked 2026-11-12: PublicNode accepted the subscription but sent nothing in 45 s, and
+  # dRPC's free plan refuses logsSubscribe. The public server limits each IP address:
+  # after a drop it can refuse new connections (HTTP 413) for up to a minute, while
+  # connections already open keep streaming, which is what the second connection is for.
+  # Two connections use twice the data (about 130 GB a day).
   sources:
     - name: solana-public
       ws_url: wss://api.mainnet.solana.com
+      connection: 1
     - name: solana-public-legacy
       ws_url: wss://api.mainnet-beta.solana.com
+      connection: 1
+    - name: solana-public-legacy
+      ws_url: wss://api.mainnet-beta.solana.com
+      connection: 2
+    - name: solana-public
+      ws_url: wss://api.mainnet.solana.com
+      connection: 2
     # Helius bills WebSocket data at 2 credits per 0.1 MB. The full pump.fun stream would
     # use the free 1M monthly credits in under 3 days, so this stays off.
     - name: helius
       ws_url: wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}
       enabled: false
+      connection: 2
 
+  # Waits between reconnect attempts: doubling from initial_s up to max_s. The public
+  # server's refusals (HTTP 413) last up to about a minute; short waits reconnect soon
+  # after they end.
   reconnect:
     initial_s: 1
-    max_s: 30
-  # Reconnect if no message arrives for this long (the stream normally sends ~130 per second).
+    max_s: 8
+  # Reconnect if no message arrives for this long (measured 2026-11-12: 120-510 a second).
   stale_after_s: 20
 
 recorder:
@@ -35,8 +57,12 @@ recorder:
   flush_interval_s: 60
   # Recording stops, and a gap is logged, when the data drive has less free space than this.
   min_free_gb: 5
-  # Length of one recording burst. `agentd status` shows a bar toward it.
-  goal_hours: 24
+  # Length of one recording burst; `agentd status` shows a bar toward it. 0 records
+  # continuously (spec 15.0 step B, from 2026-11-13): the status then shows uptime only.
+  goal_hours: 0
+  # Share of time the recorder must cover (spec 15.1, operations): `agentd status` shows
+  # the last 24 hours against it.
+  uptime_target: 0.95
   # A break at least this long (in the gap log) starts a new burst; shorter ones, such
   # as a restart, count toward the same burst.
   session_break_hours: 1

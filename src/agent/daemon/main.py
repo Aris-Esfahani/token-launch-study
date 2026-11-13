@@ -1,8 +1,9 @@
 """The engine process (`agentd`).
 
-Connects to the live feed, parses pump.fun events, records them to Parquet with a gap
-log, prints them in foreground mode, and keeps a heartbeat file so `agentd status` and
-`agentd stop` work. Live state, scoring and alerts arrive in later phases.
+Keeps one or more live connections open at once (spec 15.0 step B), parses pump.fun
+events, records them to Parquet with a gap log, judges every new token at T+30/60/120/300
+s with the rules in config/rules.yaml (step C), and keeps a heartbeat file so `agentd
+status` and `agentd stop` work. In foreground mode it prints events, verdicts or alerts.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from pathlib import Path
 
 from agent import __version__
 from agent.config import AppConfig, load_config
+from agent.daemon import live_state
 from agent.daemon.control import (
     HEARTBEAT_S,
     RunFiles,
@@ -29,9 +31,11 @@ from agent.daemon.control import (
     process_started_at,
     write_status,
 )
+from agent.features.token_state import CreatorIndex
 from agent.ingest import downloads
 from agent.ingest.parsers import ParsedTx
 from agent.ingest.pipeline import Pipeline
+from agent.ingest.recorder import ParquetSink
 from agent.ingest.rpc import Rpc, RpcError
 from agent.ingest.ws_client import LogNotification, LogsStream
 from agent.logging_setup import redact, setup_logging
@@ -43,18 +47,51 @@ TICK_S = 0.5  # how often the stop and pause flags are checked
 RATE_WINDOW_S = 60.0
 SUMMARY_EVERY_S = 300.0
 STALL_AFTER_S = 10.0  # a tick this late means the PC slept or the engine froze
+RULES_CHECK_S = 10.0  # how often config/rules.yaml is checked for edits
+SHOW = ("events", "verdicts", "alerts")  # what the foreground view prints
 
 
 @dataclass
-class Feed:
-    started_at: float = field(default_factory=time.time)
+class Connection:
+    """One of the live connections that run at the same time."""
+
+    name: str
     connected: bool = False
     source: str | None = None
     reconnects: int = 0
     last_message_at: float | None = None
     last_disconnect: dict | None = None
+
+
+@dataclass
+class Feed:
+    started_at: float = field(default_factory=time.time)
+    connections: dict[str, Connection] = field(default_factory=dict)
     # (time, messages, failed, tokens, trades, bytes) samples for the last minute
     samples: deque = field(default_factory=deque)
+
+    @property
+    def connected(self) -> bool:
+        return any(c.connected for c in self.connections.values())
+
+    @property
+    def source(self) -> str | None:
+        names = [c.source for c in self.connections.values() if c.connected and c.source]
+        return " + ".join(names) or None
+
+    @property
+    def reconnects(self) -> int:
+        return sum(c.reconnects for c in self.connections.values())
+
+    @property
+    def last_message_at(self) -> float | None:
+        times = [c.last_message_at for c in self.connections.values() if c.last_message_at]
+        return max(times) if times else None
+
+    @property
+    def last_disconnect(self) -> dict | None:
+        drops = [c.last_disconnect for c in self.connections.values() if c.last_disconnect]
+        return max(drops, key=lambda d: d["at"]) if drops else None
 
 
 def _rates(feed: Feed, pipeline: Pipeline) -> dict:
@@ -82,11 +119,14 @@ def _rates(feed: Feed, pipeline: Pipeline) -> dict:
 
 
 def _status(
-    state: str, feed: Feed, pipeline: Pipeline, rates: dict, proc_started: float | None, cfg
+    state: str, feed: Feed, pipeline: Pipeline, rates: dict, proc_started: float | None, cfg,
+    live: dict | None = None,
 ) -> dict:
     now = time.time()
     s, sink = pipeline.stats, pipeline.sink
     last_gap = pipeline.gap_log.last
+    covered = pipeline.gaps.last_ts
+    firsts = sum(s.first_by.values())
     return {
         "state": state,
         "pid": os.getpid(),
@@ -133,6 +173,25 @@ def _status(
         ),
         "disk_free_gb": round(shutil.disk_usage(cfg.data_dir).free / 1e9, 1),
         "data_dir": str(cfg.data_dir),
+        # How far on chain the recording has covered everything, and how long ago that was.
+        "covered_ts": covered,
+        "covered_lag_s": round(now - covered, 1) if covered else None,
+        "connections": [
+            {
+                "name": c.name,
+                "source": c.source,
+                "connected": c.connected,
+                "reconnects": c.reconnects,
+                "last_message_age_s": (
+                    round(now - c.last_message_at, 1) if c.last_message_at else None
+                ),
+                "last_disconnect": c.last_disconnect,
+                "lag_s": s.lag_by.get(c.name),
+                "first_share": round(s.first_by.get(c.name, 0) / firsts, 3) if firsts else None,
+            }
+            for c in feed.connections.values()
+        ],
+        "live": live,
         **rates,
     }
 
@@ -168,7 +227,49 @@ _DEFAULT_PUBKEY = "1" * 32  # an all-zero address: pump.fun's marker for "paired
 _WRAPPED_SOL = "So11111111111111111111111111111111111111112"
 
 
-async def run(cfg: AppConfig, *, foreground: bool, creates_only: bool = False) -> int:
+def _creator_index(data_dir: Path) -> CreatorIndex:
+    """Every recorded or backfilled launch, so `dev_prior_launches` counts the same live
+    as in a replay. Missing data just means fewer launches counted."""
+    import duckdb  # only the engine's start-up needs it
+
+    creators = CreatorIndex()
+    patterns = [
+        f"{(data_dir / root / 'tokens').as_posix()}/*/*.parquet"
+        for root in ("raw", "raw_backfill")
+        if any((data_dir / root / "tokens").glob("*/*.parquet"))
+    ]
+    if not patterns:
+        return creators
+    with duckdb.connect() as db:
+        rows = db.execute(
+            f"SELECT creator, ts, mint FROM read_parquet({patterns!r}, union_by_name=true) "
+            "ORDER BY ts"
+        ).fetchall()
+    for creator, ts, mint in rows:
+        creators.add(creator, ts, mint)
+    return creators
+
+
+def _live_status(live: live_state.LiveSignals | None, rules: live_state.RulesFile) -> dict:
+    if live is None:
+        return {"enabled": False, "rules_error": rules.error}
+    st = live.stats
+    return {
+        "enabled": True,
+        "tokens_tracked": st.tokens_tracked,
+        "tokens_seen": st.tokens_seen,
+        "verdicts": dict(st.verdicts),
+        "verdicts_with_gap": st.verdicts_with_gap,
+        "median_wait_s": live.median_wait_s(),
+        "last_alert": st.last_alert,
+        "rules_sha": live.rules_sha,
+        "rules_error": rules.error,
+    }
+
+
+async def run(
+    cfg: AppConfig, *, foreground: bool, creates_only: bool = False, show: str = "events"
+) -> int:
     files = RunFiles(cfg.run_dir)
     files.run_dir.mkdir(parents=True, exist_ok=True)
     state, previous = engine_state(files)
@@ -181,13 +282,22 @@ async def run(cfg: AppConfig, *, foreground: bool, creates_only: bool = False) -
     # Keep the previous run's download count before this run's status replaces it.
     downloads.record_previous_run(files.run_dir, previous)
 
-    endpoints, skipped = cfg.endpoints()
+    groups, skipped = cfg.connections()
     if skipped:
         log.info("live sources skipped (no value set in .env): %s", ", ".join(skipped))
-    if not endpoints:
+    if not groups:
         print("No live source is enabled. Check `live.sources` in config/settings.yaml.")
         return 1
     programs = cfg.subscribed_programs()
+
+    # Live signals and verdicts. If the rules cannot be read, the engine still records.
+    rules = live_state.RulesFile(cfg.root / "config" / "rules.yaml")
+    rules.load()
+    live: live_state.LiveSignals | None = None
+
+    def on_row(table: str, row: dict) -> None:
+        if live is not None:
+            live.add(table, row)
 
     recorder = cfg.settings.recorder
     pipeline = Pipeline(
@@ -195,6 +305,8 @@ async def run(cfg: AppConfig, *, foreground: bool, creates_only: bool = False) -
         cfg.run_dir,
         flush_interval_s=recorder.flush_interval_s,
         min_free_gb=recorder.min_free_gb,
+        on_row=on_row,
+        row_tables=live_state.TABLES,
     )
     # The parser's layouts (IDL files) must belong to the programs named in settings.
     for name, address in pipeline.parser.program_ids.items():
@@ -202,50 +314,101 @@ async def run(cfg: AppConfig, *, foreground: bool, creates_only: bool = False) -
             print(f"settings.yaml program '{name}' does not match the IDL address {address}.")
             return 1
 
+    if rules.rules:
+        try:
+            creators = _creator_index(cfg.data_dir)
+        except Exception as exc:  # noqa: BLE001 - never let this stop recording
+            log.warning("could not read earlier launches (%s); prior launches undercounted", exc)
+            creators = CreatorIndex()
+        live = live_state.LiveSignals(rules.rules, rules.sha, creators, pipeline.gap_log.logged)
+        log.info("live verdicts on (rules %s)", rules.sha)
+    else:
+        log.error("live verdicts off: %s", rules.error)
+    verdict_sink = ParquetSink(
+        cfg.data_dir / "live",
+        {live_state.VERDICT_TABLE: live_state.VERDICT_COLUMNS},
+        flush_interval_s=recorder.flush_interval_s,
+        prefix="verdict",
+    )
+    alerts = open(files.run_dir / "alerts.log", "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+
     feed = Feed()
     stop = asyncio.Event()
     proc_started = process_started_at(os.getpid())
 
-    def on_state(event: str, source: str, detail: str) -> None:
+    def on_state(connection: Connection, event: str, source: str, detail: str) -> None:
         detail = redact(detail, secrets)
-        pipeline.on_connection(event, detail)
+        pipeline.on_connection(event, detail, connection.name)
         if event == "connected":
-            feed.connected, feed.source = True, source
-            log.info("live feed connected: %s", source)
+            connection.connected, connection.source = True, source
+            log.info("live feed %s connected: %s", connection.name, source)
         else:
-            feed.connected = False
-            feed.reconnects += 1
-            feed.last_disconnect = {"at": time.time(), "source": source, "reason": detail}
+            connection.connected = False
+            connection.reconnects += 1
+            connection.last_disconnect = {"at": time.time(), "source": source, "reason": detail}
 
-    def handle(n: LogNotification) -> None:
-        feed.last_message_at = n.recv_ts
-        parsed = pipeline.handle(n)
-        if parsed is None or not foreground:
+    def handle(connection: Connection, n: LogNotification) -> None:
+        connection.last_message_at = n.recv_ts
+        parsed = pipeline.handle(n, connection.name)
+        if parsed is None or not foreground or show != "events":
             return
         clock = datetime.fromtimestamp(n.recv_ts).strftime("%H:%M:%S")
         for line in describe(parsed, creates_only=creates_only):
             print(f"{clock}  {line}", flush=True)
 
-    live = cfg.settings.live
-    stream = LogsStream(
-        endpoints,
-        list(programs),
-        live.commitment,
-        reconnect_initial_s=live.reconnect.initial_s,
-        reconnect_max_s=live.reconnect.max_s,
-        stale_after_s=live.stale_after_s,
-        on_state=on_state,
-    )
+    settings = cfg.settings.live
+    streams = []
+    for number, endpoints in groups.items():
+        connection = Connection(str(number))
+        feed.connections[connection.name] = connection
+        streams.append(LogsStream(
+            endpoints,
+            list(programs),
+            settings.commitment,
+            reconnect_initial_s=settings.reconnect.initial_s,
+            reconnect_max_s=settings.reconnect.max_s,
+            stale_after_s=settings.stale_after_s,
+            on_state=lambda e, src, d, c=connection: on_state(c, e, src, d),
+        ))  # fmt: skip
+    log.info("live connections: %s", ", ".join(
+        f"{n}: {' then '.join(e.name for e in eps)}" for n, eps in groups.items()
+    ))  # fmt: skip
+
+    def judge_due() -> None:
+        if live is None:
+            return
+        for verdict in live.due(pipeline.gaps.last_ts):
+            verdict_sink.add(live_state.VERDICT_TABLE, verdict)
+            line = live_state.alert_line(verdict)
+            if verdict["level"] == live_state.PASS:
+                alerts.write(line + "\n")
+            if foreground and (show == "verdicts" or (
+                show == "alerts" and verdict["level"] == live_state.PASS
+            )):  # fmt: skip
+                print(line, flush=True)
+
+    def write_verdicts() -> None:
+        try:
+            verdict_sink.flush()
+        except OSError as exc:
+            dropped = verdict_sink.discard()
+            log.error("could not write %s verdicts (%s)", dropped, exc)
 
     files.stop_flag.unlink(missing_ok=True)
     files.pid.write_text(str(os.getpid()), encoding="utf-8")
     log.info("agentd %s starting (pid %s), data dir %s", __version__, os.getpid(), cfg.data_dir)
     exit_code = 0
     rates: dict = {}
-    stream_task = asyncio.create_task(stream.run(handle, stop))
+    stream_tasks = [
+        asyncio.create_task(
+            stream.run(lambda n, c=connection: handle(c, n), stop)
+        )
+        for stream, connection in zip(streams, feed.connections.values(), strict=True)
+    ]
     snapshot_task = asyncio.create_task(_snapshot_loop(cfg, stop, secrets))
     try:
         last_beat = 0.0
+        last_rules_check = time.monotonic()
         last_summary = time.monotonic()
         last_tick_wall = time.time()
         while not stop.is_set():
@@ -256,43 +419,66 @@ async def run(cfg: AppConfig, *, foreground: bool, creates_only: bool = False) -
             last_tick_wall = wall
             pipeline.set_paused(files.pause_flag.exists())
             pipeline.tick()
+            judge_due()
+            if verdict_sink.due():
+                write_verdicts()
+            if now - last_rules_check >= RULES_CHECK_S:
+                last_rules_check = now
+                if rules.load() and live is not None:
+                    live.rules, live.rules_sha = rules.rules, rules.sha
+                    log.info("rules reloaded (%s)", rules.sha)
+                elif rules.error:
+                    log.warning(rules.error)
             if now - last_beat >= HEARTBEAT_S:
                 last_beat = now
                 rates = _rates(feed, pipeline)
-                write_status(files, _status("running", feed, pipeline, rates, proc_started, cfg))
+                write_status(files, _status(
+                    "running", feed, pipeline, rates, proc_started, cfg, _live_status(live, rules)
+                ))  # fmt: skip
             if now - last_summary >= SUMMARY_EVERY_S and rates:
                 last_summary = now
                 written = pipeline.sink.rows_written
+                lags = ", ".join(
+                    f"{name} {lag}s" for name, lag in sorted(pipeline.stats.lag_by.items())
+                )
+                verdicts = dict(live.stats.verdicts) if live is not None else "off"
                 log.info(
-                    "feed %s: %s msg/s, %s trades/s, %s tokens/hr, lag %ss; written: %s tokens, "
-                    "%s trades; gaps this run: %s",
+                    "feed %s: %s msg/s, %s trades/s, %s tokens/hr, lag %ss (%s); written: %s "
+                    "tokens, %s trades; gaps this run: %s; verdicts: %s",
                     feed.source, rates.get("msgs_per_s"), rates.get("trades_per_s"),
-                    rates.get("creates_per_hr"), pipeline.stats.lag_s,
+                    rates.get("creates_per_hr"), pipeline.stats.lag_s, lags,
                     written.get("tokens", 0), written.get("trades", 0), pipeline.gap_log.count,
+                    verdicts,
                 )  # fmt: skip
             if files.stop_flag.exists():
                 log.info("stop requested")
                 break
-            if stream_task.done():
+            if any(task.done() for task in stream_tasks):
                 break
             await asyncio.sleep(TICK_S)
     finally:
         stop.set()
-        try:
-            await asyncio.wait_for(stream_task, timeout=10)
-        except (asyncio.CancelledError, TimeoutError):
-            stream_task.cancel()
-        except Exception:  # noqa: BLE001 - report any crash of the feed task, then exit
-            log.exception("live feed task crashed")
-            exit_code = 1
+        for task in stream_tasks:
+            try:
+                await asyncio.wait_for(task, timeout=10)
+            except (asyncio.CancelledError, TimeoutError):
+                task.cancel()
+            except Exception:  # noqa: BLE001 - report any crash of a feed task, then exit
+                log.exception("live feed task crashed")
+                exit_code = 1
         snapshot_task.cancel()
+        write_verdicts()
+        alerts.close()
         try:
             pipeline.close()  # final write, and mark the shutdown as clean
         except Exception:  # noqa: BLE001 - never let a failed final write block shutdown
             log.exception("final write failed")
             exit_code = 1
-        feed.connected = False
-        write_status(files, _status("stopped", feed, pipeline, rates, proc_started, cfg))
+        for connection in feed.connections.values():
+            connection.connected = False
+        write_status(files, _status(
+            "stopped", feed, pipeline, rates, proc_started, cfg, _live_status(live, rules)
+        ))  # fmt: skip
         files.pid.unlink(missing_ok=True)
         files.stop_flag.unlink(missing_ok=True)
         log.info("agentd stopped")
@@ -328,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentd-engine", description="Run the agent engine.")
     parser.add_argument("--foreground", action="store_true", help="print live events")
     parser.add_argument("--creates-only", action="store_true", help="print new tokens only")
+    parser.add_argument("--show", choices=SHOW, default="events", help="what to print")
     parser.add_argument("--home", help="project folder (holds config/settings.yaml)")
     args = parser.parse_args(argv)
     cfg = load_config(Path(args.home) if args.home else None)
@@ -340,7 +527,9 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout = sys.stderr = out
         faulthandler.enable(out)
     try:
-        return asyncio.run(run(cfg, foreground=args.foreground, creates_only=args.creates_only))
+        return asyncio.run(run(
+            cfg, foreground=args.foreground, creates_only=args.creates_only, show=args.show
+        ))  # fmt: skip
     except KeyboardInterrupt:
         return 0
 

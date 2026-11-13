@@ -1,8 +1,10 @@
 """Live recording pipeline: notification -> drop failed/repeated -> parse -> Parquet.
 
-Keeps the gap log honest: rows are only recorded while the feed is connected, recording
-is not paused, and the disk is accepting writes. Used by the engine; has no network code,
-so it can be tested offline.
+Several live connections can feed one pipeline: the first copy of a transaction is
+recorded and later copies are dropped as repeats, but every copy tells the gap log that
+its connection covered that moment. Rows are only recorded while recording is not paused
+and the disk is accepting writes. Used by the engine; has no network code, so it can be
+tested offline.
 """
 
 from __future__ import annotations
@@ -10,12 +12,13 @@ from __future__ import annotations
 import logging
 import shutil
 from collections import OrderedDict
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent.ingest.borsh_idl import Field
 from agent.ingest.gaps import GapLog, GapTracker
-from agent.ingest.parsers import ParsedTx, Parser, RawTx
+from agent.ingest.parsers import ParsedTx, Parser, RawTx, to_storage
 from agent.ingest.recorder import ParquetSink
 from agent.ingest.ws_client import LogNotification
 
@@ -54,6 +57,14 @@ class PipelineStats:
     last_event_ts: int | None = None  # on-chain time of the newest event
     lag_s: float | None = None  # how far behind the chain the newest event arrived
     rows_seen: dict[str, int] = field(default_factory=dict)
+    # Per live connection: messages, transactions it delivered first, and its own lag.
+    messages_by: dict[str, int] = field(default_factory=dict)
+    first_by: dict[str, int] = field(default_factory=dict)
+    lag_by: dict[str, float] = field(default_factory=dict)
+
+
+# (table, row as stored) for every row recorded; used by the engine's live signals.
+RowListener = Callable[[str, dict], None]
 
 
 class Pipeline:
@@ -65,7 +76,9 @@ class Pipeline:
         parser: Parser | None = None,
         flush_interval_s: float = 60.0,
         min_free_gb: float = 5.0,
-        dedup_size: int = 50_000,
+        dedup_size: int = 200_000,
+        on_row: RowListener | None = None,
+        row_tables: Collection[str] | None = None,
     ) -> None:
         self.parser = parser or Parser()
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -73,12 +86,18 @@ class Pipeline:
         self._data_dir = data_dir
         self._min_free = min_free_gb * 1e9
         columns = {**self.parser.columns(), TRUNCATED_TABLE: _TRUNCATED_COLUMNS}
+        self._columns = columns
+        self._on_row = on_row
+        self._row_tables = set(row_tables) if row_tables is not None else set(columns)
         self.sink = ParquetSink(data_dir / "raw", columns, flush_interval_s=flush_interval_s)
         self.gap_log = GapLog(data_dir / "gaps")
         self.gaps = GapTracker(self.gap_log, run_dir / "recorder_state.json")
         self.gaps.startup()
         self.stats = PipelineStats()
-        self._seen: OrderedDict[str, None] = OrderedDict()
+        # Signatures seen recently, with the on-chain time of their first event (None if
+        # they had none). Successful transactions only: about 90 a second, so the default
+        # remembers over half an hour, more than any lag seen between two connections.
+        self._seen: OrderedDict[str, int | None] = OrderedDict()
         self._dedup_size = dedup_size
         self.paused = False
 
@@ -86,12 +105,13 @@ class Pipeline:
     def recording(self) -> bool:
         return self.gaps.active
 
-    def handle(self, n: LogNotification) -> ParsedTx | None:
-        """Process one notification. Returns the parsed transaction, or None if it was a
-        failed transaction or a repeat."""
+    def handle(self, n: LogNotification, connection: str = "") -> ParsedTx | None:
+        """Process one notification from live connection `connection`. Returns the parsed
+        transaction, or None if it was a failed transaction or a repeat."""
         s = self.stats
         s.messages += 1
         s.bytes += n.size
+        s.messages_by[connection] = s.messages_by.get(connection, 0) + 1
         if n.err is not None:
             s.failed += 1
             return None
@@ -100,12 +120,15 @@ class Pipeline:
             return None
         if n.signature in self._seen:
             s.duplicates += 1
+            ts = self._seen[n.signature]
+            if ts is not None:
+                s.lag_by[connection] = round(n.recv_ts - ts, 1)
+                if self.gaps.active:
+                    self.gaps.on_event(ts, n.slot, connection)
             return None
-        self._seen[n.signature] = None
-        if len(self._seen) > self._dedup_size:
-            self._seen.popitem(last=False)
 
         parsed = self.parser.parse(RawTx(n.signature, n.slot, n.logs, "recorder", n.recv_ts))
+        s.first_by[connection] = s.first_by.get(connection, 0) + 1
         s.events += parsed.events
         s.unknown_events += parsed.unknown_events
         s.stale_idl_events += parsed.stale_idl_events
@@ -114,9 +137,12 @@ class Pipeline:
         for table, rows in parsed.rows.items():
             s.rows_seen[table] = s.rows_seen.get(table, 0) + len(rows)
             ts = ts if ts is not None else rows[0]["ts"]
+        self._seen[n.signature] = ts
+        if len(self._seen) > self._dedup_size:
+            self._seen.popitem(last=False)
         if ts is not None:
             s.last_event_ts = ts
-            s.lag_s = round(n.recv_ts - ts, 1)
+            s.lag_s = s.lag_by[connection] = round(n.recv_ts - ts, 1)
         if parsed.truncated:
             s.truncated += 1
 
@@ -124,10 +150,12 @@ class Pipeline:
             s.rows_dropped += sum(len(rows) for rows in parsed.rows.values())
             return parsed
         if ts is not None:
-            self.gaps.on_event(ts, n.slot)
+            self.gaps.on_event(ts, n.slot, connection)
         for table, rows in parsed.rows.items():
             for row in rows:
                 self.sink.add(table, row)
+                if self._on_row is not None and table in self._row_tables:
+                    self._on_row(table, self.stored(table, row))
         if parsed.truncated:
             self.sink.add(
                 TRUNCATED_TABLE,
@@ -136,11 +164,15 @@ class Pipeline:
             )  # fmt: skip
         return parsed
 
-    def on_connection(self, event: str, detail: str = "") -> None:
-        if event == "connected":
-            self.gaps.clear("disconnect")
-        else:
-            self.gaps.begin("disconnect", detail)
+    def stored(self, table: str, row: dict) -> dict:
+        """A parsed row as its table stores it: every column, in stored form."""
+        return {c.name: to_storage(row.get(c.name), c.kind) for c in self._columns[table]}
+
+    def on_connection(self, event: str, detail: str = "", connection: str = "") -> None:
+        """A live connection connected or dropped. A drop opens a gap only if no other
+        connection covers the time it missed (see GapTracker)."""
+        if event != "connected":
+            self.gaps.connection_dropped(connection, detail)
 
     def set_paused(self, paused: bool) -> None:
         if paused == self.paused:

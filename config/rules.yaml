@@ -1,0 +1,49 @@
+# Hand-written rules: the baseline every model must beat (spec 9).
+#
+# A token is "avoid" if any avoid rule fires, else "caution" if any caution rule fires,
+# else "pass". Each rule reads one signal (names: src/agent/features/token_state.py) and
+# fires when it is `at_least` or `below` a number, or `is` true/false. `min_age_s` keeps a
+# rule quiet until the token is that many seconds old. {value} in a reason is the signal.
+#
+# Every number here is a starting guess, not a tested value. `agent signals` shows how
+# often tokens with each verdict died or graduated, and the paper ledger will show which
+# rules earn their place. Percentages are of total supply unless a reason says otherwise.
+
+avoid:
+  - feature: dev_sold_pct          # of the tokens the dev bought
+    at_least: 50
+    reason: "dev already sold {value:.0f}% of their buy"
+  - feature: dev_hold_pct
+    at_least: 15
+    reason: "dev holds {value:.0f}% of supply"
+  - feature: top10_hold_pct
+    at_least: 30
+    reason: "top 10 wallets hold {value:.0f}%"
+  - feature: sniper_hold_pct       # spec 7 calls a coin bundled at 20%
+    at_least: 20
+    reason: "wallets that bought in the first 3 slots still hold {value:.0f}%"
+
+caution:
+  - feature: launch_slot_buyers
+    at_least: 3
+    reason: "{value:.0f} wallets bought in the launch slot (possible bundle)"
+  - feature: dev_prior_launches
+    at_least: 3
+    reason: "dev launched {value:.0f} coins before (that we saw)"
+  - feature: largest_sell_pct
+    at_least: 3
+    reason: "one sell dumped {value:.1f}% of supply"
+  - feature: unique_buyers
+    below: 10
+    min_age_s: 60
+    reason: "only {value:.0f} buyers so far"
+  - feature: net_sol_last_30s
+    below: 0
+    min_age_s: 30
+    reason: "more selling than buying in the last 30 s ({value:+.2f} SOL)"
+  - feature: is_mayhem
+    is: true
+    reason: "mayhem coin: pump.fun's own bot trades it"
+  - feature: is_sol_paired
+    is: false
+    reason: "not paired with SOL (SOL amounts not shown)"

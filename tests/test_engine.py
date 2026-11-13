@@ -147,3 +147,54 @@ def test_engine_pauses_and_resumes_recording_from_the_flag_file(tmp_path):
     assert final["bytes_received"] > 0
     ledger = downloads.read_ledger(tmp_path / "data" / "run")
     assert [(e["run_started_at"], e["bytes"]) for e in ledger] == [(123.0, 5000)]
+
+
+def test_engine_with_two_connections_records_each_transaction_once(tmp_path):
+    async def first(ws):
+        await acknowledge(ws)
+        await ws.send(as_message("pump-BuyV2"))
+        await ws.send(as_message("pump-SellV3"))
+        await ws.wait_closed()
+
+    async def second(ws):
+        await acknowledge(ws)
+        await ws.send(as_message("pump-SellV3"))  # also sent by the first connection
+        await ws.send(as_message("pump-BuyV2"))
+        await ws.send(as_message("pump-BuyV3"))  # only this connection has it
+        await ws.wait_closed()
+
+    async def scenario():
+        async with serve(first, "127.0.0.1", 0) as one, serve(second, "127.0.0.1", 0) as two:
+            port_one = one.sockets[0].getsockname()[1]
+            port_two = two.sockets[0].getsockname()[1]
+            make_project(tmp_path, ws_url=f"ws://127.0.0.1:{port_one}", extra_sources=f"""\
+                - name: second
+                  ws_url: ws://127.0.0.1:{port_two}
+                  connection: 2
+                """)  # fmt: skip
+            (tmp_path / "config" / "rules.yaml").write_text(
+                "caution:\n  - {feature: snipers, at_least: 2, reason: snipers}\n",
+                encoding="utf-8",
+            )
+            cfg = load_config(tmp_path)
+            files = RunFiles(cfg.run_dir)
+            task = asyncio.create_task(engine.run(cfg, foreground=False))
+            status = None
+            for _ in range(150):
+                status = read_status(files)
+                if status and status["messages"] == 5 and len(status["connections"]) == 2 \
+                        and all(c["connected"] for c in status["connections"]):
+                    break
+                await asyncio.sleep(0.1)
+            files.stop_flag.write_text("stop", encoding="utf-8")
+            await asyncio.wait_for(task, timeout=15)
+            return cfg, status, read_status(files)
+
+    cfg, status, final = asyncio.run(scenario())
+    assert [c["name"] for c in status["connections"]] == ["1", "2"]
+    assert {c["source"] for c in status["connections"]} == {"test", "second"}
+    assert status["connected"] and status["duplicates"] == 2
+    assert sum(c["first_share"] for c in status["connections"]) == pytest.approx(1.0)
+    assert status["live"]["enabled"] and status["live"]["tokens_seen"] == 1
+    assert final["rows_written"]["trades"] == 3 and final["gaps_logged"] == 0
+    assert (cfg.run_dir / "alerts.log").exists()

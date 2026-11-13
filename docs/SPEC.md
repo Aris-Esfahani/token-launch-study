@@ -125,7 +125,7 @@ agentd resume-recording
 agentd reload-models      # load newest model files without restarting
 ```
 
-- **Gap log:** every period when recording was off or disconnected is written to `data/gaps.parquet` (start_ts, end_ts, reason). Training and labeling must exclude or flag tokens affected by gaps (e.g., a token created during a gap has incomplete early trades). Never treat a gap as "no tokens were launched".
+- **Gap log:** every period when recording was off or disconnected is written to `data/gaps.parquet` (start_ts, end_ts, reason). Training and labeling must exclude or flag tokens affected by gaps (e.g., a token created during a gap has incomplete early trades). Never treat a gap as "no tokens were launched". *(Updated 2026-11-12, step B.)* With several live connections at once, a gap is on-chain time that no connection delivered: one connection dropping while another keeps delivering is not a gap, but a connection that is up and running late does not cover time it never reaches before it drops.
 - **Auto-start (optional):** a setting to start `agentd` on login. Windows first: Task Scheduler task created by `agentd install-autostart` (and removed by `agentd uninstall-autostart`). launchd/systemd later if needed.
 - **Sleep warning:** if the PC sleeps, recording stops. On Windows, document how to set "Sleep: Never" while plugged in (Settings → System → Power), and have `agentd status` warn if the system slept since the last check. `agentd status` and the TUI status bar must show when the last gap happened. Recommend disabling sleep while recording, or running `agentd` on an always-on machine (old PC, mini PC, or a free-tier cloud VM; verify current free-tier terms first).
 - When `agentd` is off, the TUI shows "engine offline" and offers to start it.
@@ -459,6 +459,22 @@ Never commit `.env`, data, or anyone's keys.
 
 Priority order: **parser → recorder → historical backfill → train a strong baseline → paper trade → go live.** Live-recorded data supplements the baseline; it is not the starting point.
 
+### 15.0 Build order: fast path *(updated 2026-11-12, during Phase 3; approved by the user)*
+
+The phases below keep their numbers and "done when" checks, but are built in this order so rules-based alerts go live and are paper-tracked while the backfill and models are built. The rules filter is the baseline that section 9 requires anyway; a model replaces it only when it beats it. The readiness criteria (15.1) for real money are unchanged, and every step ends with tests, its "done when" results and the user's OK.
+
+| Step | Builds | Done when |
+|---|---|---|
+| **A** | Close Phases 1 and 3 | Their "done when" checks below |
+| **B** | Engine always on (part of 12): continuous recording, a second feed connection with duplicates removed by signature | 24 h continuous run with recorder uptime ≥ 95% (the 15.1 operations threshold) |
+| **C** | Live signals + rules verdict (parts of 8 and 9): the chain-only features of 8.1-8.4, 8.8 and 8.10, computed by one piece of code that runs both live and when replaying recorded/backfilled data; hand-written rules in `config/rules.yaml` | No-lookahead test passes; a token's snapshot is identical live and replayed; every new token gets a verdict with reasons at T+30/60/120/300s |
+| **D** | Screen (part of 12): alert feed, paste box + clipboard watcher | Copy-to-verdict median < 2 s; mint first in every alert |
+| **E** | Paper ledger + `my_trades` (13) with `padre_presets.yaml` | Every alert gets a simulated entry and exit; daily paper vs. real summary |
+| *background* | Phase 4 full backfill, started after A | As in Phase 4 |
+| then | Phases 5-7, the rest of 8, 9-11, 14-16 | As below; live features and the screen are extended as models, enrichers and wallet labels arrive |
+
+*(Step B, built 2026-11-12.)* Both connections use Solana's free public server (no free alternative carried the stream: PublicNode sent nothing, dRPC's free plan refuses `logsSubscribe`, Helius bills the data). The server limits each IP address and refuses new connections for up to a minute after some drops, while open ones keep streaming. Two connections use about 130 GB of network data a day.
+
 | Phase | Build | Done when |
 |---|---|---|
 | **0. Setup** | Repo, config, `.env`, Helius key (optional; the live feed uses the public WebSocket), `agentd` start/stop/status | Daemon connects and prints live create/trade events |
@@ -506,13 +522,15 @@ Store these thresholds in `config/readiness.yaml`; `agent train` and the TUI `st
 
 *(Updated 2026-11-12, after Phase 1.)* The recorder runs in bursts until Phase 12 and continuously from then on, so paper trading adds several weeks of continuous live data on top of the backfill.
 
+*(Fast path, 2026-11-12.)* With the build order in 15.0, rules-based alerts and paper trading start in about week 2 instead of weeks 7-8, and continuous recording starts at step B. The rest of this table still gives the order of the model work.
+
 ---
 
 ## 16. Known risks and pitfalls
 
 - **Lookahead leakage** is the #1 failure mode. Enforce cutoffs in code and tests.
 - **Survivorship bias:** keep every token, especially the dead ones.
-- **Latency on free tier:** the agent will lag paid bots by seconds. Measure it; don't trust backtest fills blindly.
+- **Latency on free tier:** the agent will lag paid bots by seconds. Measure it; don't trust backtest fills blindly. *(Measured 2026-11-12, step B.)* The free public feed itself often delivers events 5-77 s after they happen (median about 6 s) and cuts the connection when far behind; two connections run late together, so a second one helps with drops, not with lateness. A verdict waits until the data up to its cutoff has arrived, so it comes late too; each verdict records how late (`wait_s`), and the paper ledger (step E) must enter at that time, not at the cutoff.
 - **PC must be on and awake** while recording (in bursts now, continuously from Phase 12); gaps in recording mean missing data and slow backfills. Log every gap. *(Updated 2026-11-12, after Phase 1.)*
 - **Stale history:** older pump.fun data reflects older fees, curves, and migration paths. Backfill recent months; down-weight older data.
 - **Backfill vs. live mismatch:** if the backfill parser and live parser differ even slightly, the model learns patterns that don't exist live. The parity test is mandatory.
@@ -583,3 +601,11 @@ Not used as training data: single Oct 2024 snapshot, aggregator-sourced (survivo
 **2026-11-12, after Phase 2: mayhem coins** (decided by the user; evidence in `docs/PROGRESS.md`, Phase 2). Marked in place with "after Phase 2".
 
 14. **Mayhem coins (8.10, 10):** treated as their own category (`is_mayhem` feature, results reported separately, a separate model if needed). The mayhem agent's trades are kept everywhere, flagged per trade; the proposal to leave them out of backtests was declined.
+
+**2026-11-12, during Phase 3: fast path** (decided by the user, who wants live trading feedback as soon as possible). Marked in place with "fast path".
+
+15. **Build order (15.0):** after Phases 1 and 3, the engine goes always-on and rules-based live signals, the screen and the paper ledger (parts of 8, 9, 12, 13) are built before the models, while the full backfill runs in the background. Recording becomes continuous at step B instead of Phase 12 (3, 3.1, 15.2). Phase numbers, "done when" checks and the readiness criteria are unchanged.
+
+**2026-11-12, step B (fast path)** (built in branch `step-b`; evidence in `docs/PROGRESS.md`, Step B). Marked in place with "step B".
+
+16. **Gaps with several connections (3.2):** a gap is on-chain time no connection delivered. **Feed lateness (16):** measured, and verdicts record how late they came; the paper ledger enters at the verdict time. **Second connection (15.0):** on the same public server; about 130 GB a day. No requirement or "done when" check changed.

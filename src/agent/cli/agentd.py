@@ -16,6 +16,7 @@ from agent.daemon.control import RunFiles, engine_state, process_started_at
 from agent.daemon.launch import spawn_detached, windowless_python
 from agent.ingest import downloads
 from agent.ingest.coverage import (
+    first_recorded_ts,
     last_recorded_ts,
     raw_bytes,
     recorded_coverage,
@@ -36,6 +37,11 @@ def start(
     creates_only: Annotated[
         bool, typer.Option("--creates-only", help="With --foreground: print new tokens only.")
     ] = False,
+    show: Annotated[
+        str,
+        typer.Option(help="With --foreground: print 'events', every 'verdicts', or 'alerts' "
+                          "(tokens that pass the rules)."),
+    ] = "events",
 ) -> None:
     """Turn the engine on."""
     cfg = load_config()
@@ -46,10 +52,15 @@ def start(
         typer.echo(f"agentd is already running (pid {status['pid']}).")
         raise typer.Exit(0)
 
+    if show not in engine.SHOW:
+        typer.echo(f"--show must be one of: {', '.join(engine.SHOW)}")
+        raise typer.Exit(2)
     if foreground:
         typer.echo("agentd running in the foreground. Press Ctrl+C to stop.")
         try:
-            code = asyncio.run(engine.run(cfg, foreground=True, creates_only=creates_only))
+            code = asyncio.run(
+                engine.run(cfg, foreground=True, creates_only=creates_only, show=show)
+            )
         except KeyboardInterrupt:
             code = 0
         raise typer.Exit(code)
@@ -127,6 +138,44 @@ def resume_recording() -> None:
 
 
 @app.command()
+def alerts(
+    last: Annotated[int, typer.Option(help="Show this many recent alerts first.")] = 20,
+    follow: Annotated[
+        bool, typer.Option("--follow", help="Keep showing new alerts until Ctrl+C.")
+    ] = False,
+) -> None:
+    """Tokens that passed the rules (config/rules.yaml), newest last, mint first."""
+    cfg = load_config()
+    path = RunFiles(cfg.run_dir).run_dir / "alerts.log"
+    if not path.exists() and not follow:
+        typer.echo("No alerts yet. The engine writes them once it runs with config/rules.yaml.")
+        raise typer.Exit(1)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    for line in lines[-last:] if last > 0 else []:
+        typer.echo(line)
+    if not follow:
+        return
+    typer.echo("Waiting for new alerts. Press Ctrl+C to stop.")
+    position = path.stat().st_size if path.exists() else 0
+    try:
+        while True:
+            time.sleep(0.5)
+            if not path.exists():
+                continue
+            size = path.stat().st_size
+            if size < position:
+                position = 0  # the file was replaced
+            if size > position:
+                with open(path, encoding="utf-8") as fh:
+                    fh.seek(position)
+                    for line in fh.read().splitlines():
+                        typer.echo(line)
+                    position = fh.tell()
+    except KeyboardInterrupt:
+        pass
+
+
+@app.command()
 def status() -> None:
     """Show whether the engine is running and what the live feed is doing."""
     cfg = load_config()
@@ -139,7 +188,9 @@ def status() -> None:
         end = last_recorded_ts(cfg.run_dir) or (s or {}).get("updated_at")
         if end:
             typer.echo(f"saved:    {_saved(cfg.data_dir, end)}")
-            typer.echo(f"burst:    {_burst(cfg, end, running=False)}")
+            typer.echo(f"uptime:   {_uptime(cfg, end)}")
+            if cfg.settings.recorder.goal_hours > 0:
+                typer.echo(f"burst:    {_burst(cfg, end, running=False)}")
             days_line, size_line = _history(cfg, end, s)
             typer.echo(f"history:  {days_line}")
             typer.echo(f"          {size_line}")
@@ -151,10 +202,8 @@ def status() -> None:
     if state == "unresponsive":
         age = int(time.time() - s["updated_at"])
         typer.echo(f"           no heartbeat for {age}s; the numbers below are old")
-    age = s.get("last_message_age_s")
-    last = f"last message {age}s ago" if age is not None else "no messages yet"
-    connected = "connected" if s.get("connected") else "NOT connected"
-    typer.echo(f"feed:      {s.get('source') or '-'}, {connected}, {last}")
+    for line in _feed_lines(s):
+        typer.echo(line)
     if s.get("msgs_per_s") is not None:
         failed = s.get("failed_share")
         failed_text = f"{failed:.0%} failed" if failed is not None else "failed share n/a"
@@ -186,13 +235,19 @@ def status() -> None:
         f"{s.get('files_written', 0)} files), last write {last_write_text}"
     )
     typer.echo(f"saved:     {_saved(cfg.data_dir, time.time())}")
-    typer.echo(f"burst:     {_burst(cfg, time.time(), running=True)}")
+    typer.echo(f"uptime:    {_uptime(cfg, time.time())}")
+    if cfg.settings.recorder.goal_hours > 0:
+        typer.echo(f"burst:     {_burst(cfg, time.time(), running=True)}")
     days_line, size_line = _history(cfg, time.time(), s)
     typer.echo(f"history:   {days_line}")
     typer.echo(f"           {size_line}")
+    typer.echo(f"verdicts:  {_verdicts(s.get('live'))}")
     lag = s.get("lag_s")
+    covered = s.get("covered_lag_s")
+    covered_text = f" (all data up to {covered}s ago)" if covered is not None else ""
     typer.echo(
-        f"quality:   {f'{lag}s behind the chain' if lag is not None else 'lag n/a'}; "
+        f"quality:   {f'{lag}s behind the chain' if lag is not None else 'lag n/a'}"
+        f"{covered_text}; "
         f"{s.get('duplicates', 0)} repeats and {s.get('simulated', 0)} simulated dropped; "
         f"{s.get('truncated', 0)} cut-off logs; "
         f"{s.get('decode_errors', 0)} decode errors"
@@ -209,6 +264,65 @@ def status() -> None:
     typer.echo(f"gaps:      {s.get('gaps_logged', 0)} logged this run{last_gap}{open_gap}")
     typer.echo(f"disk:      {s.get('disk_free_gb')} GB free at {s.get('data_dir')}")
     typer.echo(f"log:       {files.log}")
+
+
+def _feed_lines(s: dict) -> list[str]:
+    """One line per live connection (older status files have a single feed)."""
+    connections = s.get("connections")
+    if not connections:
+        age = s.get("last_message_age_s")
+        last = f"last message {age}s ago" if age is not None else "no messages yet"
+        connected = "connected" if s.get("connected") else "NOT connected"
+        return [f"feed:      {s.get('source') or '-'}, {connected}, {last}"]
+    lines = []
+    for c in connections:
+        age = c.get("last_message_age_s")
+        state = "connected" if c.get("connected") else "NOT connected"
+        parts = [c.get("source") or "-", state]
+        parts.append(f"last message {age}s ago" if age is not None else "no messages yet")
+        if c.get("lag_s") is not None:
+            parts.append(f"{c['lag_s']}s behind")
+        if c.get("first_share") is not None:
+            parts.append(f"first for {c['first_share']:.0%}")
+        parts.append(f"{c.get('reconnects', 0)} drops")
+        lines.append(f"feed {c['name']}:    " + ", ".join(parts))
+    return lines
+
+
+def _verdicts(live: dict | None) -> str:
+    if not live:
+        return "n/a (engine version without verdicts)"
+    if not live.get("enabled"):
+        return f"OFF ({live.get('rules_error') or 'no rules'})"
+    counts = live.get("verdicts", {})
+    total = sum(counts.values())
+    by_level = ", ".join(f"{level} {counts[level]:,}" for level in sorted(counts)) or "none yet"
+    wait = live.get("median_wait_s")
+    wait_text = f"; median {wait:.1f}s after the cutoff" if wait is not None else ""
+    alert = live.get("last_alert")
+    alert_text = f"; last pass {_clock(alert['at'])}" if alert else "; no pass yet"
+    error = f"; RULES PROBLEM: {live['rules_error']}" if live.get("rules_error") else ""
+    return (
+        f"{total:,} made ({by_level}); {live.get('verdicts_with_gap', 0):,} with gaps; "
+        f"{live.get('tokens_tracked', 0):,} tokens tracked{wait_text}{alert_text}{error}"
+    )
+
+
+def _uptime(cfg, end: float, window_s: float = 86400) -> str:
+    """Share of the last 24 hours (or of the time since recording began) recorded, against
+    the target in settings.yaml (spec 15.1: at least 95%)."""
+    first = first_recorded_ts(cfg.data_dir / "raw")
+    if first is None or end <= first:
+        return "nothing recorded yet"
+    since = max(first, end - window_s)
+    coverage = recorded_coverage(cfg.data_dir, end, since)
+    if coverage is None or coverage.span_seconds <= 0:
+        return "nothing recorded yet"
+    share = coverage.recorded_seconds / coverage.span_seconds
+    target = cfg.settings.recorder.uptime_target
+    verdict = "meets" if share >= target else "BELOW"
+    span = "the last 24 h" if since > first else f"the time since {_when(first)}"
+    return f"{share:.1%} of {span} recorded; {verdict} the {target:.0%} target"
 
 
 def _saved(data_dir: Path, end: float) -> str:

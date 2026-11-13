@@ -9,8 +9,146 @@ Spec: [SPEC.md](SPEC.md) (moved from the project root on 2026-11-12; edits are l
 | Pre-work: section 18 verification | Done 2026-11-12 | Results below. |
 | 0. Setup | Done 2026-11-12 (user OK'd) | Results in "Phase 0" below. |
 | 1. Parser + recorder | **Built 2026-11-12; 24-hour run in progress** | Results in "Phase 1" below. Not complete until the 24-hour run passes the audit and the user OKs it. |
-| 2. Curve math + tests | Done 2026-11-12 (user OK'd) | Built while Phase 1's 24-hour run continued (user's choice). Results in "Phase 2" below. Two proposed spec changes still open. |
-| 3. Backfill pilot | **Built 2026-11-12; pilot download not started** | Plan approved by the user. Waiting for epoch 1084 to be published (~22:00 local), then a ~417 GB download that needs the user's OK. Results in "Phase 3" below. |
+| 2. Curve math + tests | Done 2026-11-12 (user OK'd) | Built while Phase 1's 24-hour run continued (user's choice). Results in "Phase 2" below. Mayhem proposals decided 2026-11-12 (spec 8.10). |
+| 3. Backfill pilot | **Built 2026-11-12; download waiting for the archive** | Plan approved by the user. The user OK'd the ~417 GB download and runs it with `--wait`; epoch 1084 is expected in the archive ~22:00 local. Results in "Phase 3" below. |
+
+Build order since 2026-11-12: the fast path in spec 15.0 (user's decision). Steps: A close
+Phases 1 and 3, B engine always on, C live signals + rules verdict, D screen, E paper
+ledger; the full backfill (Phase 4) runs in the background after A.
+
+| Fast-path step | State | Notes |
+|---|---|---|
+| A. Close Phases 1 and 3 | Waiting for data | Pilot download tonight; Phase 1 audit after the 24-hour run (~05:24 local, Nov 13). |
+| B. Engine always on | **Built 2026-11-12 in a separate copy (branch `step-b`)** | Two live connections, gap log for several connections, continuous recording, uptime in `agentd status`. Deployed at the agentd restart after the Phase 1 audit; done when a 24-hour run records ≥ 95%. Results in "Step B" below. |
+| C. Live signals + rules verdict | **Built 2026-11-12 (branch `step-b`); live check after deployment** | The engine judges every new token at T+30/60/120/300 s; `agent check-live` compares live with replay. Results in "Step C" below. |
+| D. Screen | Not started | |
+| E. Paper ledger | Not started | Needs the user's Padre settings (`padre_presets.yaml`). |
+
+## Step B: engine always on (fast path, built 2026-11-12)
+
+**Done when:** "24 h continuous run with recorder uptime ≥ 95% (the 15.1 operations
+threshold)." **Not yet met:** it needs the 24-hour run after deployment. Baseline, the
+current single connection: 88.6% of the time since 04:03 recorded (1 h 47 m off in 249
+gaps, as of 19:50).
+
+Built in a separate copy of the code (`.worktrees/step-b`, branch `step-b`), so the
+running recorder and tonight's backfill, which load code from the main folder, are not
+touched. It goes live at the restart after the Phase 1 audit.
+- **Several live connections at once** (`connection:` per source in settings.yaml). Two
+  connections, both on Solana's public server, starting on its two different addresses.
+  A transaction both deliver is recorded once (the first copy); the repeat-memory now
+  holds 200,000 signatures (over half an hour of successful transactions).
+- **Gap log for several connections** (`ingest/gaps.py`): each connection's unbroken run
+  of events is a segment; a gap is logged only for on-chain time no connection covered.
+  This includes the case where one connection is up but running late and the other one
+  drops and reconnects: if the late one drops before reaching the moment the other one
+  came back, the stretch in between is logged as a gap even though a connection was
+  always up. With one connection the rule is unchanged.
+- **Reconnects:** the longest wait between attempts is now 8 s (was 30 s).
+- **Continuous recording:** `recorder.goal_hours: 0` (no burst bar); `agentd status`
+  shows an `uptime:` line for the last 24 hours against `recorder.uptime_target` (95%),
+  one `feed N:` line per connection (how late, how often first, drops), how far on chain
+  everything has been recorded, and a `verdicts:` line.
+
+| Check | Result |
+|---|---|
+| Tests | 268 pass (25 new), ruff clean. One older test (chain snapshots on schedule) waited a fixed 2.5 s and failed when the PC was busy, with the old code too; it now waits for the second snapshot and checks the spacing |
+| Gap log, several connections | Tests: one connection dropping while the other runs is no gap; both dropping is a gap from the last event either delivered; a late connection covers the other's reconnect; a hole is logged when it drops first; repeats count as coverage; pause and lost rows break every connection |
+| Engine with two fake feeds | Each transaction recorded once, both connections in the status, no gap |
+| Engine speed | About 140 µs per transaction including the repeat: ~1% of one core at ~90 successful transactions a second |
+| 24 h uptime ≥ 95% | After deployment |
+
+Findings (from the engine log and two short live tests, 2026-11-12):
+1. **Why the feed drops.** The public server closes the connection every 1-5 minutes
+   (close code it reports as invalid, logged as "1002 protocol error"). After some drops
+   it refuses new connections with HTTP 413 for 40-60 s, on both of its addresses at
+   once (53 times today), so it limits by our IP address. Connections already open keep
+   streaming during a refusal: that is what the second connection covers.
+2. **The feed often runs late.** Events arrive 0.3-77 s after their on-chain time
+   (5-minute log samples: median about 6 s, 20-77 s at times), and the server cuts the connection
+   when it is far behind; the events it had not sent yet are lost, which is why the
+   median gap was 22 s although a reconnect takes about 1.5 s. Not our engine: it used 2%
+   of one core. Two connections were late together (minute by minute 1-13 s, within a
+   few seconds of each other), so a second connection helps little with lateness; it
+   helps with drops. Late data delays verdicts: a T+30 s verdict comes when the data up
+   to T+30 s has arrived (`wait_s` in each verdict, median in `agentd status`).
+3. **No free alternative feed found.** PublicNode accepted the subscription but sent
+   nothing in 45 s; dRPC's free plan refuses `logsSubscribe`; Helius bills the stream
+   (settings.yaml). So both connections use Solana's public server.
+4. **Data use doubles** to about 130 GB a day with two connections.
+5. **An 8-minute test with two extra connections (19:28-19:36)** ran fine (one drop, the
+   other connection covered it: 1,727 transactions reached only one connection), but the
+   running recorder was refused reconnects twice during it, at 19:29 (57 s gap) and
+   19:36 (68 s gap). Those refusals usually come every 1-2 hours, so the test's extra
+   load most likely caused them. Both are in the gap log; the Phase 1 audit counts them
+   as gaps. No more live tests until the 24-hour run is over.
+
+Deployment, after the Phase 1 audit: `agentd stop`, bring branch `step-b` into the main
+folder (after tonight's backfill has finished), `agentd start`, then `agent verify-curve`
+and, after a few hours, `agent check-live`.
+
+## Step C: live signals + rules verdict (fast path, built 2026-11-12)
+
+**Done when:** "No-lookahead test passes; a token's snapshot is identical live and
+replayed; every new token gets a verdict with reasons at T+30/60/120/300s." **Met in
+tests; the live checks need the engine running the new code** (after the Phase 1 audit).
+
+Built (first part, before step B):
+- `features/token_state.py`: one token's state from its events and its signals at a
+  cutoff: trade flow, holders, dev, snipers/bundles, curve, mayhem share (spec 8.1-8.4,
+  8.10). Reads only events with `ts <= cutoff`; arrival order and repeats do not matter.
+- `features/replay.py`: the same code over recorded (and later backfilled) Parquet, with
+  gap flags, plus `outcomes` (dead at 30 min, graduated in 1 h) for evaluation only.
+- `models/rules.py` + `config/rules.yaml`: the hand-written rules baseline (spec 9):
+  avoid / caution / pass with plain-word reasons. Every threshold is a starting guess.
+- `agent signals --hours N --at S`: replays recorded tokens through both and shows the
+  verdicts and what happened to the tokens afterwards.
+
+Built with step B (branch `step-b`):
+- `daemon/live_state.py`: the engine keeps every new token's state in memory for 15
+  minutes and judges it at T+30/60/120/300 s once the recording has covered the chain 2 s
+  past the cutoff, so a verdict uses every event up to the cutoff and none after it.
+  Verdicts touched by a recording gap say so. Trades that arrive before their token's
+  create (possible with two connections) wait up to 3 minutes for it. Rules are read
+  again when `config/rules.yaml` changes; a file that does not parse keeps the old rules.
+- Verdicts are saved to `live/verdicts/` (every signal included, plus how late the
+  verdict came and which rules version made it); tokens that pass go to
+  `run/alerts.log`. `agentd alerts [--follow]` shows them, mint first;
+  `agentd start --foreground --show verdicts|alerts` prints them.
+- `agent check-live --hours N`: replays the recorded data for the tokens judged live and
+  checks that every snapshot is identical.
+
+| Check | Result |
+|---|---|
+| Tests | 268 pass with step B (47 new since Phase 3), ruff clean |
+| No-lookahead test (spec 6) | Pass: 300 later trades and a curve completion change no earlier snapshot |
+| Same signals live and replayed | Pass in tests: real transactions through the recorder; the live verdicts' snapshots equal a replay of the Parquet files it wrote. Found and fixed on the way: trades arriving before their create were lost live |
+| Same signals on the real feed | After deployment: `agent check-live` |
+| Every new token judged at T+30/60/120/300 s | After deployment (tests: each cutoff once, only after it is covered) |
+| First real run (8 h, 08:41-16:41 local) | 15,313 tokens; 9,322 judged at T+60 s, 5,991 left out because a recording gap touched their first minute; 15 s for 3 h of tokens |
+
+First look at the starting rules (tokens whose first hour was recorded, gaps under 10%):
+
+| Verdict at T+60 s | Tokens | Dead at 30 min | Graduated in 1 h |
+|---|---|---|---|
+| avoid | 756 | 93% | 4.1% |
+| caution | 1,208 | 88% | 0.7% |
+| pass | 7 | 57% | 0.0% |
+
+Findings:
+1. **The starting rules do not sort tokens well.** "avoid" tokens graduated more often
+   than "caution" ones, and only 0.2% of tokens pass. "Dev already sold" alone fires on
+   41% of all tokens. Thresholds should be set on one period and checked on another
+   (never tuned on the hours they are judged on); the backfill gives enough days for that.
+2. **Recording gaps hide 39% of tokens' first minute** at today's drop rate (194 gaps in
+   11 h), which is why step B (engine always on, second connection) comes first.
+3. About 90% of new tokens are dead within 30 minutes and about 2% graduate within an
+   hour (this sample); any filter is judged against those base rates.
+
+Left for step C: apply mayhem reserve resets; market context (launches and graduations
+per hour, spec 8.8); choose the rule thresholds on one period and check them on another.
+Until then the rules pass about 0.2% of tokens (about 3 an hour) and the passes are not
+known to be better than chance.
 
 ## Phase 3: backfill pilot (2026-11-12)
 
@@ -293,4 +431,4 @@ Still open:
 4. Backfill window (decide at the Phase 3 pilot). Connection: Xfinity, ~900 Mbps download, unlimited data.
 5. Phase 3: the user OK'd the ~417 GB download of epoch 1084 on 2026-11-12 and runs it in their own window (`--wait`, starts once published). Then the pilot measurements and `agent parity --epoch 1084`.
 6. Phase 4: disk plan for 28 days (about 110-115 GB at the trial's rate; D: has 194 GB free since the user cleared 114 GB on 2026-11-12, so it fits without trimming, with ~80 GB to spare), and the priority-fee / Jito-tip columns.
-7. Phase order (user, 2026-11-12): keep section 15's order where it is functionally better, but get the agent live as soon as possible for trading feedback. Proposed fast path, waiting for the user's OK: after Phases 1 and 3 close, run the full backfill (Phase 4) in the background, and meanwhile build live features, a rules-based verdict, the screen and the paper ledger (parts of Phases 8, 12, 13), so rules-based alerts go live and are paper-tracked; models (Phases 5-7, 9-11) replace the rules only if they beat them. The spec's section 15 is updated once the user agrees.
+7. Phase order (user, 2026-11-12): keep section 15's order where it is functionally better, but get the agent live as soon as possible for trading feedback. **Approved by the user 2026-11-12 (spec 15.0, change log 15):** after Phases 1 and 3 close, run the full backfill (Phase 4) in the background, and meanwhile build live features, a rules-based verdict, the screen and the paper ledger (parts of Phases 8, 12, 13), so rules-based alerts go live and are paper-tracked; models (Phases 5-7, 9-11) replace the rules only if they beat them.

@@ -63,24 +63,66 @@ def test_simulated_transactions_are_dropped(tmp_path):
     assert stored(tmp_path, "tokens") == [] and stored(tmp_path, "trades") == []
 
 
-def test_disconnect_is_logged_and_events_in_between_are_not_recorded(tmp_path):
+def test_disconnect_is_logged_from_the_last_event_before_to_the_first_after(tmp_path):
     p = make(tmp_path)
-    before, during, after = live("pump-BuyV3"), live("pump-Buy"), live("pump-BuyV2")
+    before, after = live("pump-BuyV3"), live("pump-BuyV2")
     p.handle(before)
     p.on_connection("disconnected", "ConnectionClosedError: no close frame")
-    assert not p.recording
-    p.handle(during)
+    assert p.gaps.open_reason == "disconnect"
     p.on_connection("connected")
     p.handle(after)
     p.flush()
 
     recorded = {row[0] for row in stored(tmp_path, "trades")}
     assert recorded == {before.signature, after.signature}
-    assert p.stats.rows_dropped == 1
     (gap,) = gaps(tmp_path)
     assert gap["reason"] == "disconnect" and "ConnectionClosedError" in gap["detail"]
     assert (gap["start_slot"], gap["end_slot"]) == (before.slot, after.slot)
     assert (gap["start_ts"], gap["end_ts"]) == (1794482629.0, 1794482633.0)
+
+
+def test_two_connections_record_each_transaction_once_and_cover_each_other(tmp_path):
+    p = make(tmp_path)
+    # In chain order, as a live stream delivers them.
+    first, second, third = (
+        live(name, slot=1000 + i) for i, name in enumerate(("pump-BuyV3", "pump-Buy", "pump-BuyV2"))
+    )
+    for n in (first, second):
+        assert p.handle(n, "1") is not None
+        assert p.handle(n, "2") is None  # a repeat from the other connection
+    p.on_connection("disconnected", "reset", "1")  # connection 2 is still up
+    assert p.handle(third, "2") is not None
+    p.flush()
+    assert {row[0] for row in stored(tmp_path, "trades")} == {
+        first.signature, second.signature, third.signature
+    }
+    assert gaps(tmp_path) == [] and p.gaps.open_reason is None
+    s = p.stats
+    assert s.duplicates == 2 and s.first_by == {"1": 2, "2": 1}
+    assert s.messages_by == {"1": 2, "2": 3} and set(s.lag_by) == {"1", "2"}
+
+
+def test_recorded_rows_reach_the_listener_in_stored_form(tmp_path):
+    seen = []
+    p = make(tmp_path, on_row=lambda table, row: seen.append((table, row)))
+    p.handle(live("pump-BuyV2"))
+    p.flush()
+    tables = [table for table, _ in seen]
+    assert tables.count("tokens") == 1 and "trades" in tables
+    create = next(row for table, row in seen if table == "tokens")
+    with duckdb.connect() as db:
+        cursor = db.execute(
+            f"SELECT * FROM read_parquet('{(tmp_path / 'data' / 'raw' / 'tokens').as_posix()}"
+            "/*/*.parquet')"
+        )
+        names = [d[0] for d in cursor.description]
+        on_disk = dict(zip(names, cursor.fetchone(), strict=True))
+    on_disk.pop("date")  # the folder name (date=YYYY-MM-DD), not a stored column
+    assert create == on_disk  # the live path sees exactly what a replay reads back
+    p.set_paused(True)
+    seen.clear()
+    p.handle(live("pump-SellV3"))
+    assert seen == []  # not recorded, so not passed on
 
 
 def test_pause_and_resume(tmp_path):

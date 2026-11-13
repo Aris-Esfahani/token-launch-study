@@ -31,6 +31,9 @@ class Source(BaseModel):
     name: str
     ws_url: str  # may contain ${ENV_VAR}; never log this
     enabled: bool = True
+    # Connections run at the same time; sources with the same number are tried in turn
+    # for that one connection.
+    connection: int = 1
 
 
 class Reconnect(BaseModel):
@@ -49,8 +52,9 @@ class Live(BaseModel):
 class Recorder(BaseModel):
     flush_interval_s: float = 60.0  # how often buffered rows are written to disk
     min_free_gb: float = 5.0  # stop recording (and log a gap) below this much free space
-    goal_hours: float = 24.0  # length of one recording burst, shown as a bar in status
+    goal_hours: float = 24.0  # length of one recording burst, shown as a bar; 0 = continuous
     session_break_hours: float = 1.0  # a gap at least this long starts a new burst
+    uptime_target: float = 0.95  # spec 15.1: recorder uptime over the paper-trading period
 
 
 class Chain(BaseModel):
@@ -102,6 +106,7 @@ class Endpoint:
 
     name: str
     url: str = field(repr=False)
+    connection: int = 1
 
 
 @dataclass(frozen=True)
@@ -139,8 +144,17 @@ class AppConfig:
             if url is None:
                 skipped.append(src.name)
             else:
-                ready.append(Endpoint(src.name, url))
+                ready.append(Endpoint(src.name, url, src.connection))
         return ready, skipped
+
+    def connections(self) -> tuple[dict[int, list[Endpoint]], list[str]]:
+        """Enabled sources grouped by connection number (each group is one connection that
+        runs all the time), plus the names of sources skipped for a missing value."""
+        ready, skipped = self.endpoints()
+        groups: dict[int, list[Endpoint]] = {}
+        for endpoint in ready:
+            groups.setdefault(endpoint.connection, []).append(endpoint)
+        return dict(sorted(groups.items())), skipped
 
     def rpc_url(self) -> str:
         """The HTTP RPC address for lookups. May contain an API key: never log it."""
