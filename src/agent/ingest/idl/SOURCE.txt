@@ -1,0 +1,9 @@
+Anchor IDL files for the pump.fun programs, copied unchanged from
+https://github.com/pump-fun/pump-public-docs (folder idl/)
+commit 639b87fb45c3adeffa6f7c4a1bf0cb85e392bf22
+committed 2026-10-13T15:37:48Z
+fetched 2026-11-12
+
+The parser reads event layouts from these files, so no layout is written in code.
+To update after pump.fun changes its programs: replace the files, update this note,
+and re-run the tests.

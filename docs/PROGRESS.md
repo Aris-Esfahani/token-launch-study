@@ -1,0 +1,296 @@
+# Progress log
+
+Spec: [SPEC.md](SPEC.md) (moved from the project root on 2026-11-12; edits are listed in its section 19).
+
+## Status
+
+| Phase | State | Notes |
+|---|---|---|
+| Pre-work: section 18 verification | Done 2026-11-12 | Results below. |
+| 0. Setup | Done 2026-11-12 (user OK'd) | Results in "Phase 0" below. |
+| 1. Parser + recorder | **Built 2026-11-12; 24-hour run in progress** | Results in "Phase 1" below. Not complete until the 24-hour run passes the audit and the user OKs it. |
+| 2. Curve math + tests | Done 2026-11-12 (user OK'd) | Built while Phase 1's 24-hour run continued (user's choice). Results in "Phase 2" below. Two proposed spec changes still open. |
+| 3. Backfill pilot | **Built 2026-11-12; pilot download not started** | Plan approved by the user. Waiting for epoch 1084 to be published (~22:00 local), then a ~417 GB download that needs the user's OK. Results in "Phase 3" below. |
+
+## Phase 3: backfill pilot (2026-11-12)
+
+**Done when:** "Measured download size, disk use, and parse time per epoch; parity test
+passes against the recorder for an overlapping period." **Not yet met:** both need the
+pilot epoch (1084), which the archive has not published yet.
+
+Plan approved by the user on 2026-11-12, with two spec edits (SPEC.md change log 12-13):
+our own archive reader instead of Jetstreamer, and a precise parity definition.
+
+Built:
+- `src/agent/ingest/car.py`: reads Old Faithful's CAR files (DAG-CBOR nodes, split
+  values, zstd + protobuf transaction metadata) and the per-slot index. Every node is
+  checked against the hash in its CID. Transactions in all three formats in use are
+  read, and every field is walked so the sizes must add up exactly: legacy, v0 (lookup
+  tables) and v1 (SIMD-0385, signatures at the end, active on mainnet since October).
+- `src/agent/ingest/oldfaithful_extract.py`: keeps successful transactions that mention
+  pump.fun or PumpSwap (the live feed's own rule) and runs their logs through the shared
+  parser, `source = backfill`. Adds backfill-only `bf_` columns: position in the block,
+  fee, signature count, compute units, whether it mentions pump.fun (directly or only
+  through a lookup table), and where it is in the archive file.
+- `src/agent/ingest/oldfaithful_backfill.py`: 64-slot chunks, one HTTP range request
+  each, 6 worker processes, 80 MB/s limit (settings.yaml `backfill:`). Resumable
+  (`progress.jsonl`), retries, failed chunks in `backfill/gaps/`, files from an
+  interrupted write set aside (never deleted). Downloads are added to the ledger that
+  `agentd status` reports. Rows go to `raw_backfill/`.
+- `src/agent/backfill_parity.py`: the parity test as defined in spec 4.1.
+- Commands: `agent backfill --epoch N [--wait] [--status]`, `agent parity --epoch N`.
+- Tests: `test_car.py`, `test_backfill_parity.py` (the spec's required test),
+  `test_backfill.py`; fixture: one real slot (468072129, epoch 1083) and the RPC's copy
+  of its 128 pump.fun/PumpSwap transactions (`tools/capture_car_fixture.py`).
+  221 tests pass; ruff clean.
+
+Checks against real data (small reads only, about 0.3 GB in total):
+
+| Check | Result |
+|---|---|
+| 40 slots of epoch 1083 (28.6 MB) | 12,797 transactions, all read with exact sizes: 4,319 legacy, 4,451 v0 (2,041 with lookup tables), 4,027 v1 |
+| Fixture slot vs. the RPC | all 128 transactions identical in signature, slot, block time, accounts, lookup-table accounts, fee, compute units, logs and error |
+| Same transactions through both paths | every shared column identical (archive bytes vs. live log lines) |
+| Trial run, 6 chunks (0.22 GB), real worker processes | 101,092 transactions; 22,704 kept; 21,320 failed ones dropped; 0 unreadable; 0 decode errors; 38 MB/s decoding per core |
+
+Findings:
+1. **v1 transactions are about 31% of all transactions.** Readers older than
+   SIMD-0385 fail on them. The live path is not affected (it reads logs only).
+2. **44% of bonding-curve trades reach pump.fun only through a lookup table**
+   (trial sample). The live feed must deliver them for the recorder's miss rate to be
+   ~0.6%; the parity test measures this directly (`backfill_only_via_lookup`).
+3. **Disk is the limit for 28 days, not bandwidth.** The trial kept about 4 GB per day
+   of chain, mostly PumpSwap trades (~240 bytes per row). 28 days would be about
+   110-115 GB; D: has 86 GB free. Options for Phase 4: keep PumpSwap rows only for
+   tokens that launched in the window, drop or shrink columns, or a bigger drive. The
+   pilot measures this on a full epoch.
+4. **Epoch size:** epoch 1083 is 416.7 GB (6,750 chunks, no gaps between slots). The
+   archive has no filter, so the whole epoch is downloaded.
+5. **Not stored yet:** Jito tips and the priority fee itself (spec 5 lists `priority_fee`
+   and `jito_tip` on trades). The raw fee and signature count are stored, and the
+   archive position of each kept transaction, so tips can later be read from about 1% of
+   the epoch instead of all of it. Proposed for Phase 4.
+6. Epoch 1084 (overlaps the recording from 12:03 UTC Nov 12 to its end, ~00:06 UTC
+   Nov 13) was not in the archive at 16:23 UTC. Expected about 6 hours after its end.
+
+## Phase 2: curve math + tests (2026-11-12)
+
+**Done when:** "Simulated prices match on-chain trade prices within tolerance." **Result: met.**
+
+`agent verify-curve --hours 24` on the recording so far (12:03-14:03 UTC):
+
+| Trade kind | Trades | Exact | Within tolerance |
+|---|---|---|---|
+| sell | 104,371 | 100.000% | 100% |
+| buy, set amount of SOL | 95,377 | 99.999% | 100% |
+| buy, exact tokens | 24,447 | 100.000% | 100% |
+| buy, multi-hop route | 5,481 | 99.453% | 100% |
+| **all** | **229,676** | **99.987%** | **100%** |
+
+Tolerance: quote and fees within 1 lamport, tokens within one part in a million. The
+largest difference seen was 1 lamport. Threshold for PASS: 99.9% exact and 99.99% in
+tolerance (set in `sim/verify.py`). Tests: 189 passed, lint clean.
+
+Also checked:
+- **Fee schedule from chain** (Global + FeeConfig accounts, decoded with the IDL): matches
+  the rates charged on 100% of direct trades (151,393 SOL-paired, 26,193 paired with
+  another coin, 1,184 USDC-paired).
+- **Continuity:** 99.47% of trades on normal coins start exactly where a recorded event
+  left the curve. The 0.53% that do not are worth a look in Phase 3 (likely the logged
+  gaps and cut-off logs).
+
+What was built:
+- `sim/curve_math.py`: buy (exact tokens or a set budget) and sell, fees, price impact,
+  market cap, curve progress. Formulas from pump-sdk 4.1.0 (`bondingCurve.ts`, `fees.ts`),
+  confirmed on recorded trades.
+- `sim/chain_config.py`: reads `Global` and `FeeConfig` from chain into dated snapshots
+  (`data/config_snapshots/`); fee schedule by quote type and market-cap tier. Account
+  addresses are derived from the IDL. `agent snapshot-config` saves one now; the engine
+  saves one at start-up and every 6 hours.
+- `sim/verify.py` and `agent verify-curve`: the check above.
+- `borsh_idl.py` can now decode accounts; the parser records one more event
+  (`mayhem_params`, below).
+
+Findings that matter later:
+- **Mayhem mode coins.** About a fifth of new coins are "mayhem" coins, on which pump.fun's
+  own agent trades. The agent's trades (63,378 so far, about 22% of all trades) are
+  fee-free and priced by the mayhem program, not by the curve formula; it also resets
+  these coins' reserves between trades. Ordinary traders on mayhem coins follow the
+  normal formula exactly. The agent's wallet is derived from the IDL (`sol_vault_authority`
+  of `set_mayhem_virtual_params`), nothing hardcoded.
+- Because the resets were not recorded, only 36% of trades on mayhem coins start from a
+  recorded state. The parser now records the resets (`mayhem_params`); this takes effect
+  when the engine is next restarted (after Phase 1's audit), and the continuity number
+  should then be re-checked.
+- **Two fee details the docs do not state**, found in the data: a coin without a creator
+  pays no creator fee even though its events show a rate; and a set-budget buy computes
+  fees before trimming the net by up to 1 lamport.
+- **Multi-hop routes** (a buy through one coin into another) charge each fee once for the
+  whole route, so the per-coin schedule does not apply to them. Padre's normal buys are
+  direct, so this does not affect backtests.
+- **Not simulated:** the part of a v3 buy that goes past the end of the curve into the
+  future PumpSwap pool. Such a buy is capped at the curve's remaining tokens and flagged.
+
+Proposed spec changes, decided by the user on 2026-11-12 (spec 8.10, 10, change log 14):
+1. Section 7 and 8: treat mayhem coins as their own category (a feature, or a separate
+   model), since an automated pump.fun trader moves their prices. **Accepted.**
+2. Section 10: backtests skip the mayhem agent's trades when measuring market activity,
+   and use the recorded resets for the curve state. **Declined:** the agent's trades stay
+   in, flagged per trade; the recorded resets are used for curve state.
+
+## Phase 1: parser + recorder (2026-11-12)
+
+**Done when:** "24h run with < 1% missed tokens (spot-check against an explorer); gaps logged."
+**Result so far:** built and tested; a six-minute live run passed the audit. **The 24-hour run has not been done yet.**
+
+| Check | Result |
+|---|---|
+| Tests | 141 passed (`.venv\Scripts\pytest`), lint clean |
+| Parser on real transactions | 46 mainnet transactions captured on 2026-11-12 (every pump.fun and PumpSwap instruction seen in 7 minutes, plus a bonding-curve completion and a migration): all decode, 0 errors, 0 events missing from the IDL |
+| Six-minute live run | 165 tokens and 12,865 trades written; 0 reconnects; 0 decode errors; events arrive a median 1.1 s behind the chain (95% within 2.5 s) |
+| Gap log | A deliberate 15 s pause was logged as one gap with exact start and end slots |
+| Audit of that run (4.4 min window) | 130 creates on chain: 119 recorded, 10 missed inside the logged pause, 1 in the first second of the recording (an edge the audit now skips). No real misses. Trades of 8 random tokens: 470 on chain, 0 missed |
+| Reading while writing | DuckDB read the Parquet files while the engine was writing them: fine on Windows |
+
+**24-hour run:** started 2026-11-12 04:03 local time (12:03 UTC) with the user's OK, on a clean
+data folder (the six-minute test recording was deleted with the user's OK). Two minutes in:
+55 tokens and 4,456 trades written, 3 simulated transactions dropped, none on disk, no gaps.
+
+Restarts during the run (all in the gap log):
+- 04:29:46 the user stopped it and restarted it at 04:30:40 from their own PowerShell, to move it
+  out of Claude's shell (54 s gap).
+- 04:31:02 that run ended when the user closed the window, before its first write: its
+  ~20 s of rows were lost. The user started it again at 04:32:24 (157 s gap, which covers
+  the lost rows). Checked at 04:39: running, and not tied to any window, job or app.
+
+Fix (2026-11-12): `agentd start` now asks Windows' process service (WMI) to start the engine,
+with pythonw.exe and no window. Cause, confirmed by simulation: a terminal that ends
+everything started from it on close, and refuses to let processes leave, also ended the
+detached engine. A program started the new way survives it (`tests/test_launch.py`). Two
+related bugs fixed: a crash before a run's first write was labeled `recorder_off` instead
+of `crash` (coverage was already correct), and two writers in one process within the same
+second could give two data files the same name. Tests: 146 passed.
+
+- 04:45:27 the 04:32 run (started with the old method) ended without a clean shutdown; cause
+  unknown. Restarted at 04:46:45 with the new method (78 s crash gap).
+- 05:48:42 the public Solana endpoint dropped the connection and refused new ones (HTTP 413)
+  for about a minute; the recorder kept retrying, switched between the two public
+  addresses, reconnected by itself and logged a 64 s disconnect gap.
+
+- 06:05 and 06:20: two more public-endpoint drops (93 s and 9 s), handled the same way.
+- 06:10: the engine was stopped and started again with `agentd stop` / `agentd start`
+  (23 s gap). Since then it runs the Phase 2 code: chain snapshot saved at start-up,
+  mayhem reserve resets recorded.
+
+**Interim audit at 06:22 (2.1 h window, not the Phase 1 result):** PASS. 3,422 creates on
+chain; 22 missed outside logged gaps (0.64%), 261 inside gaps. The 22 are spread evenly
+in time, not near gaps: the public feed silently drops about 0.6% of transactions.
+Trades of 20 sample tokens: 0.69% missed. Also 5 recorded transactions (2 creates, 3
+trades) are unknown to the chain: the feed delivered transactions that never landed.
+Ideas for later: a second simultaneous connection to cut silent drops; the backfill
+(Phase 3-4) is the clean source for training either way.
+
+`agentd status` now shows how long the engine has run, how much time is recorded (minus
+gaps), and a bar toward the 24-hour burst (`recorder.goal_hours`). Tests: 153 passed.
+
+To finish Phase 1, when the status bar reaches 100% (about 04:07-04:10 on 2026-11-13) run
+`.venv\Scripts\agent audit --hours 24 --trades-sample 20` and record the result here.
+
+What was built:
+- `ingest/idl/` the three official IDL files, pinned to commit `639b87f` (2026-10-13), with `SOURCE.txt`.
+- `ingest/borsh_idl.py` decoder driven by the IDL (no layout in code); `ingest/solana.py` base58 and PDA derivation.
+- `ingest/parsers.py` the one parser for live and backfill; `ingest/recorder.py` Parquet writer (temp file then rename); `ingest/gaps.py` gap log and tracker; `ingest/pipeline.py` ties them together.
+- `ingest/rpc.py` and `audit.py`: `agent audit` compares the recording with the chain.
+- `agentd pause-recording` / `resume-recording`; `agentd status` shows rows written, lag, gaps, disk.
+- `tools/capture_fixtures.py` re-captures real test transactions when pump.fun changes its programs.
+
+Findings that matter later:
+- **Simulated transactions leak into the public feed.** They carry an all-zero signature and never happened on chain. The recorder now drops them. The six-minute test recording still holds one such token row and one trade row (written before the fix).
+- **The live program is newer than the official IDL.** Trade events carry 8 more bytes than the IDL (2026-10-13) describes; usually zero, sometimes not. Known fields decode; the extra bytes are stored in `extra_hex`, so they can be decoded once pump.fun publishes the layout.
+- **PumpSwap is not recorded live.** Its stream measured 319 messages/s, about 83 GB/day, four times the bonding-curve stream. PumpSwap rows are written only when a transaction also touches the bonding-curve program (migrations, multi-hop swaps).
+- **Not everything is SOL-paired.** In a one-minute sample, 11% of trades and 19% of new tokens were paired with another coin (mostly the PUMP token), and 22% of new tokens were mayhem-mode. For those trades `sol_amount` is 0 and `quote_amount` holds the amount.
+- Only 56% of new mints in that sample end in `pump` (spec 12.3 treats that as usual).
+- Event time (`ts`) can be one second earlier than the node's block time. `ts` is used everywhere because the backfill will see the same value.
+- **Storage:** 179 bytes per trade row and 682 per token row on disk, about 0.65 GB per day. My earlier estimate (0.15-0.35 GB) was too low.
+- **Network:** the stream measured 22-54 GB per day across runs (it grows with market activity).
+- Logs cut short by the node: 7 transactions in six minutes (about 0.05%); listed in `truncated_txs` for repair from the backfill.
+- Not yet seen on real data: `PostCompleteBuyEvent` (rare), and transactions from before the 2026-09-12 and 2026-10-07 layout changes. Older layouts are tested by cutting a real event short; real old transactions arrive with the Phase 3 backfill.
+
+Differed from the spec. Applied to `docs/SPEC.md` on 2026-11-12 with the user's approval (change log items 8-11), together with a fourth edit: record in bursts (24-hour runs) until Phase 12, continuously from then on.
+1. Section 5: each table mirrors one on-chain event, with pump.fun's own column names (`user` stored as `wallet`). Bonding-curve trades are in `trades`, PumpSwap trades in `amm_trades`, instead of one `trades` table with a `venue` column.
+2. Sections 2 and 15: live recording covers the bonding curve only, for the bandwidth reason above. PumpSwap history would come from the backfill; live PumpSwap for freshly graduated tokens could use one small subscription per new pool.
+3. Section 12.3: a mint ending in `pump` is a weak hint, not a rule.
+
+## Phase 0: setup (2026-11-12)
+
+**Done when:** "Daemon connects and prints live create/trade events." **Result: met.**
+
+| Check | Result |
+|---|---|
+| Unit and offline end-to-end tests | 37 passed (`.venv\Scripts\pytest`), lint clean |
+| `agentd start --foreground` on the live feed, ~32 s | Connected to `solana-public` in under 1 s; printed 12 CREATE and 857 TRADE lines |
+| `agentd status` while running | Showed pid, source, rates, data received, reconnects |
+| `agentd start` (background), status from a separate command, `agentd stop` | Engine kept running between commands; second `start` said "already running"; stop took about 1 s; no process left behind |
+| Secrets | No key in the log or status file; `.env` is git-ignored |
+
+What was built:
+- Repo, `.gitignore`, `.env.example`, `pyproject.toml`, `config/settings.yaml`, README.
+- `src/agent/config.py` (settings + secrets), `logging_setup.py` (scrubs keys from every log line).
+- `src/agent/ingest/ws_client.py` (live log stream: reconnect, quiet-feed detection, failover between sources) and `ingest/logs.py` (works out which program wrote each log line, so another program cannot fake a pump.fun event).
+- `src/agent/daemon/main.py` (engine loop, heartbeat, stop flag), `daemon/control.py` (status/pid files), `cli/agentd.py` (`start`, `stop`, `status`).
+
+Things to know:
+- Phase 0 recognizes create and trade events by their 8-byte event tag only. It does not decode fields (mint, amounts) and writes nothing to disk. Both are Phase 1.
+- **Data use:** the live stream measured 22-33 GB/day in three short runs (it varies with how many failed transactions are in the stream; my first measurement was 18.6 GB/day). The public endpoint does not compress, so that is real network use: about 20-35 GB for a 24 h test, 0.6-1 TB per month if left on nonstop.
+- The feed delivered 5 of 869 events twice in one run (~0.6%). The Phase 1 recorder must drop repeats by signature.
+- `wss://api.mainnet.solana.com` (the hostname in Solana's current docs) works and is the primary source; the older `-beta` hostname is the fallback.
+- Not built in Phase 0, by design: `pause-recording` / `resume-recording` (Phase 1, with the gap log), `reload-models`, auto-start, the `agent` command.
+- The project rules are in the README rather than a separate file.
+
+## Section 18 verification (2026-11-12)
+
+How each item was checked: **doc** = read the provider's current docs, **chain** = read from Solana mainnet via the public RPC, **measured** = measured on this PC, **not verified** = could not confirm.
+
+| # | Item | Result | How |
+|---|---|---|---|
+| 1 | Helius free tier vs `logsSubscribe` on pump.fun | 1M credits/month, 10 RPC req/s, 5 WebSocket connections, standard WS methods only. WebSocket data is billed at 2 credits per 0.1 MB. The pump.fun log stream is ~133 msg/s, ~226 KB/s, ~18.6 GB/day (80% failed transactions) = ~381k credits/day = ~11M credits/month. **Does not fit** (free credits last under 3 days; the $49 plan's 10M would not cover it either). | doc + measured (30 s sample) |
+| 2 | pump.fun instruction/event layouts | Official IDL (`pump-fun/pump-public-docs`, updated 2026-10-13) read. Create: `create`, `create_v2`. Trades: legacy `buy` / `sell` / `buy_exact_sol_in`; `*_v2` (27 accounts, non-SOL quote coins); `*_v3` (17 accounts, since 2026-10-07). Events: `CreateEvent`, `TradeEvent` (35 fields, includes per-trade fees, `quote_mint`, `ix_name`), `CompleteEvent`, `PostCompleteBuyEvent` (new), `CompletePumpAmmMigrationEvent`. Events appear both as `Program data:` log lines and as inner self-CPI instructions (seen on live transactions). Coins can now be paired with SOL, USDC, or another pump coin. | doc + chain |
+| 3 | RugCheck endpoints | Keyless GET: `/v1/tokens/{mint}/report`, `/report/summary`, `/insiders/graph`, `/insiders/networks`, `/metadata`, `/votes`, `/v1/stats/*`. Bulk and write endpoints need a JWT. **No published rate limits**: cap ourselves, back off on HTTP 429, cache by mint. | doc (Swagger) |
+| 4 | Bitquery sample | Repo exists with a Solana folder that includes pump.fun samples (trades, pools, per-token OHLCV). Sample only; full export is a paid product. Use for schema reference only. | doc |
+| 5 | Old Faithful + Jetstreamer | Free hosting is live and nearly current (epoch 1083 file dated today; chain is in epoch 1084). CAR size: 293-388 GB for epochs 1075-1083, 555-672 GB for epochs 1040-1060. An epoch is now ~1.07 days (slots ~215 ms). 2-3 months = ~56-84 epochs = roughly 20-40 TB to stream. Download speed here: ~32 MB/s (~270 Mbit/s) in a short single-connection test, so ~3 h per recent epoch. Jetstreamer moved from Anza to Vaultic (`vaultic-win/jetstreamer`, v0.10.0, Rust 1.98.1+); no server-side program filter (stream the whole epoch, filter locally); CI covers Linux only, **Windows build not verified**. | doc + measured |
+| 6 | MemeTrans / Kaggle | MemeTrans was renamed **MELT** (`git-disl/MELT`), license CC BY-NC 4.0, 41,470 tokens that migrated to Raydium: graduated tokens only and pre-PumpSwap mechanics, so usable only for the bundle-logic cross-check. Kaggle "Solana Skill Sprint" graduation competition exists (predict graduation from the first 100 blocks); **license, dates and rules not verified** (needs a logged-in Kaggle account). | doc / not verified |
+| 7 | BigQuery | Public Solana dataset has user reports of stalling (2025-03-31) and multi-day delays (2025-11). **Current freshness and pump.fun decoded table names not verified** (needs a Google Cloud account). Not on the critical path. | not verified |
+| 8 | Disk / machine | C: 30.6 GB free, D: 80.5 GB free. Ryzen 5 5600X, 32 GB RAM, desktop, sleep on AC already set to Never. | measured |
+| 9 | Fee schedule + curve parameters | Read from the Global account `4wTV1Y...xnjf` and FeeConfig `8Wf5Ti...VwTt`: initial virtual token reserves 1,073,000,000,000,000; initial virtual SOL 30,000,000,000 lamports; initial real token reserves 793,100,000,000,000; total supply 1,000,000,000,000,000; pool migration fee 15,000,001 lamports; FeeConfig has one tier: protocol 95 bps + creator 30 bps; creator fee configurable up to 300 bps; buyback 5,000 bps of the protocol fee; max quote depth 2. Decoded by hand from IDL offsets: **preliminary**, to be re-checked against real trades in Phase 2. | chain |
+| 10 | Clipboard on Windows | `pyperclip` 1.11.0 supports Windows natively. Plan: poll `GetClipboardSequenceNumber` (does not open the clipboard) and read only on change. **Not tested yet** (Phase 12). | doc |
+| 11 | Windows specifics | Windows Terminal installed; long paths already enabled; Python 3.12.6 64-bit at `D:\COMP SCI\Python` (path contains a space, so use a venv). Parquet: write to a temp name, close, then rename; never rewrite a file a reader may have open. DuckDB: query Parquet read-only, no shared `.duckdb` file. Textual 8.2.8 rendering and Task Scheduler **not tested yet**. | measured / doc |
+| 12 | Padre presets | Needed from the user before Phase 11: slippage, priority fee, buy size, take-profit, stop-loss, time stop. | open |
+
+Other things found along the way:
+- Both program IDs in the spec are correct and executable on mainnet. Fees now live in a separate fee program (`pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ`).
+- Solana now has version-1 transactions; RPC calls must allow them (`maxSupportedTransactionVersion`).
+- About 37,000 pump.fun tokens are created per day (extrapolated from a 30 s sample).
+- Public Solana RPC limits: 100 requests / 10 s per IP, 40 connections, 100 MB / 30 s. The pump.fun log stream uses ~7 MB / 30 s.
+- PumpPortal: new-token and migration streams are free, trade streams are paid (0.01 SOL per 10,000 events).
+- SQD Portal can filter history by program on the server, but its free tier is for evaluation only and is slated to be capped at ~50 MB-1 GB per month once billing starts.
+
+## Open decisions
+
+Decided by the user on 2026-11-12:
+- Live feed: public Solana WebSocket as primary; Helius for lookups and gap repair.
+- Data folder: `D:\memecoin-agent-data`.
+- Spec moved to `docs/SPEC.md` with the seven recommended edits applied.
+- After Phase 1: four more spec edits applied (SPEC.md change log items 8-11): event tables, bonding-curve-only live recording, `pump` suffix as a weak hint, recording in bursts until Phase 12.
+- Internet plan: **unlimited data, confirmed** from the user's Xfinity usage page on 2026-11-12 ("Your plan comes with unlimited data"; 381 GB used so far in November). The recorder (22-54 GB per day) can run nonstop. The backfill is limited by time and by being far above normal home use, not by a monthly cap.
+
+Still open:
+1. The audit of the 24-hour run (Phase 1 "done when"), then the user's OK. Then stop the recorder (bursts).
+   On the next start the engine runs the Phase 2 code (mayhem resets, chain snapshots);
+   re-run `agent verify-curve` after that start to re-check mayhem-coin continuity.
+1b. ~~A decision on the two proposed spec changes under Phase 2 (mayhem coins).~~ Decided 2026-11-12: own category, agent trades kept (spec 8.10).
+2. Later option: live PumpSwap for freshly graduated tokens via one small subscription per new pool.
+3. Padre presets (needed before Phase 11).
+4. Backfill window (decide at the Phase 3 pilot). Connection: Xfinity, ~900 Mbps download, unlimited data.
+5. Phase 3: the user OK'd the ~417 GB download of epoch 1084 on 2026-11-12 and runs it in their own window (`--wait`, starts once published). Then the pilot measurements and `agent parity --epoch 1084`.
+6. Phase 4: disk plan for 28 days (about 110-115 GB at the trial's rate; D: has 194 GB free since the user cleared 114 GB on 2026-11-12, so it fits without trimming, with ~80 GB to spare), and the priority-fee / Jito-tip columns.
+7. Phase order (user, 2026-11-12): keep section 15's order where it is functionally better, but get the agent live as soon as possible for trading feedback. Proposed fast path, waiting for the user's OK: after Phases 1 and 3 close, run the full backfill (Phase 4) in the background, and meanwhile build live features, a rules-based verdict, the screen and the paper ledger (parts of Phases 8, 12, 13), so rules-based alerts go live and are paper-tracked; models (Phases 5-7, 9-11) replace the rules only if they beat them. The spec's section 15 is updated once the user agrees.

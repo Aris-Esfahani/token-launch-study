@@ -1,0 +1,110 @@
+{
+ "signature": "3a9mWzz9i5XTopUCatG1EUSTTQz3A5w9Zuo9pyQJi8q5eBRSkCcTvTn4s6A42Pxg5d5TtfZoxq87LVSj7bh93sp8",
+ "slot": 468507277,
+ "blockTime": 1794482628,
+ "version": 0,
+ "err": null,
+ "fee": 9000,
+ "accountKeys": [
+  "HckQ93Xqjjo8mwt5pNPWvyCTZXQZ858rvzmm7ZRrZg9t",
+  "G3B4v9YCjeTA4vXwu5q1hevvaA7L5tZ93UT9b3a8QWxi",
+  "37RatP3xCguv7S8PjYKhLywQDFudsvYDPjzzxQ4rhdgz",
+  "KokzWEerv3kSa7WUebPwuxeW4FJ1zWU6ZVek3eQG2Hx",
+  "A6kamjJPFR7pzDE5uMKSMfQBrjFMAyaGrZQGjNqbPPH7",
+  "Hk4FqrF1RyCXoUFpyUKKoX3ayFi1b82S2rLf4BLu1NHA",
+  "ComputeBudget111111111111111111111111111111",
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+  "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh",
+  "11111111111111111111111111111111",
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+  "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1",
+  "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+  "6Ntk13GQu9VRfWdfNBZuSEMwsGQPEbzt4aVVSqfWsfC",
+  "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR"
+ ],
+ "loadedAddresses": {
+  "readonly": [],
+  "writable": []
+ },
+ "instructions": [
+  {
+   "accounts": [],
+   "data": "HMypLP",
+   "programIdIndex": 6,
+   "stackHeight": 1
+  },
+  {
+   "accounts": [],
+   "data": "3GAG5eogvTjV",
+   "programIdIndex": 6,
+   "stackHeight": 1
+  },
+  {
+   "accounts": [
+    0,
+    1,
+    2,
+    8,
+    9,
+    10
+   ],
+   "data": "2",
+   "programIdIndex": 7,
+   "stackHeight": 1
+  },
+  {
+   "accounts": [
+    2,
+    1,
+    3,
+    4,
+    8,
+    10,
+    7,
+    9,
+    12,
+    11
+   ],
+   "data": "bdpoExJbbLb",
+   "programIdIndex": 11,
+   "stackHeight": 1
+  },
+  {
+   "accounts": [
+    8,
+    10,
+    2,
+    14,
+    5,
+    1,
+    15,
+    13
+   ],
+   "data": "ToNg27JNfmT",
+   "programIdIndex": 13,
+   "stackHeight": 1
+  }
+ ],
+ "innerInstructions": [],
+ "logMessages": [
+  "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+  "Program ComputeBudget111111111111111111111111111111 success",
+  "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+  "Program ComputeBudget111111111111111111111111111111 success",
+  "Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL invoke [1]",
+  "Program log: CreateIdempotent",
+  "Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL consumed 5955 of 399700 compute units",
+  "Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL success",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]",
+  "Program log: Instruction: CollectCreatorFeeV2",
+  "Program log: No creator fee to collect",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P consumed 18489 of 393745 compute units",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P success",
+  "Program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA invoke [1]",
+  "Program log: Instruction: CollectCoinCreatorFee",
+  "Program log: No coin creator fee to collect",
+  "Program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA consumed 14188 of 375256 compute units",
+  "Program pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA success"
+ ]
+}

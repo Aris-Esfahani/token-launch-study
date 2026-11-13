@@ -1,0 +1,585 @@
+# Memecoin Signal Agent for Padre: Build Spec
+
+Handoff doc for Claude Code. Read fully before writing code.
+
+**What this is:** a local terminal app that scores brand-new pump.fun tokens and gives instant analysis on any mint the user is looking at in **Padre** (trade.padre.gg / terminal.pump.fun). The human trades manually on Padre. **The agent never places trades and never touches private keys.**
+
+---
+
+## 0. Locked decisions
+
+| Decision | Choice |
+|---|---|
+| Trading venue | **Padre** (manual execution by the user). Padre has no public API. |
+| Chain / tokens | Solana, pump.fun bonding curve (and PumpSwap after graduation) |
+| Trading window | First **0-15 min** after token creation |
+| Interface | **Terminal app (TUI)**: live alert feed + instant on-demand analysis + clipboard watcher |
+| Remote alerts | Optional later: Telegram/Discord, alerts only (for when away from laptop) |
+| Budget | **Free tiers only** |
+| Language / stack | Python 3.11+, asyncio, Textual (TUI), DuckDB + Parquet, LightGBM |
+| LLM | Claude, only for slow, optional narrative/copycat/"why" explanations. Never in the fast path. |
+| Runs on | User's laptop (or an always-on machine for `agentd`); packaged so others can install it (section 14) |
+| OS | **Windows** (user's machines are Windows PCs). Build and test on Windows first; native Python on Windows, not WSL, so the clipboard watcher and auto-start work. Keep code cross-platform (pathlib, no shell-specific scripts) so macOS/Linux still work. |
+| Training data priority | **Historical first.** Train a strong baseline on backfilled history (Old Faithful, last 2-3 months) + public datasets **before** relying on live recordings. The live recorder adds fresh data on top. *(Updated 2026-11-12: 2-3 months is the target. The actual window is set by the Phase 3 pilot, starting with 2-4 weeks; see 4.1.)* |
+| User timeline | User is not trading soon. No rush to go live; prioritize a well-trained, well-tested baseline. |
+| Prediction stages (build in order) | 1. Rug/bundle filter → 2. Graduation → 3. 2x-before-(-50%) → 4. Filter-then-rank |
+
+---
+
+## 1. How it fits the Padre workflow
+
+```
+Padre (browser)                         Agent (terminal, beside Padre)
+─────────────────                       ──────────────────────────────
+Trenches shows a new coin  ──copy mint──>  clipboard watcher detects mint
+                                           fast verdict in < 1-2s
+                                           enrichment follows a few s later
+User decides on Padre      <───────────  risk / grad / 2x scores + reasons
+Buys with Padre preset,
+sets TP / SL / limit orders
+                                         agent also pushes its own alerts
+                                         (mint first, so it can be pasted into Padre)
+```
+
+Padre-specific rules:
+- **Mint address first** in every alert and analysis, so it can be pasted straight into Padre's search.
+- **Mirror Padre's mental model:** show the same kinds of signals Padre's Trenches filters use (liquidity/curve progress, holder growth, dev history, insider/top-holder concentration, bundles), so the user can cross-check the agent against Padre's screen.
+- **Exit rules in backtests and paper trading mirror the user's Padre settings** (take-profit, stop-loss, time stop, slippage, priority fee). Keep them in `config/padre_presets.yaml`.
+- **Do not automate, scrape, or reverse-engineer Padre's UI or private endpoints.** It has no public API, it can break without warning, and it risks the user's account. All data comes from the chain and public APIs.
+- **User's own Padre trades as labels:** Padre trades come from the user's own wallet, so pull them from the chain using the wallet's **public address** (in `.env`, never a private key). No manual logging needed.
+- Official Padre domains only in any links: `trade.padre.gg`, `terminal.pump.fun`, `padre.gg`, `app.padre.gg`.
+
+---
+
+## 2. Goals and non-goals
+
+**Goals**
+- Build a large, recent historical training set (backfill) before going live.
+- Record every new pump.fun token and bonding-curve trade in real time. *(Updated 2026-11-12, after Phase 1. PumpSwap trading is not recorded live: its stream is about 83 GB/day, four times the bonding-curve stream. PumpSwap history comes from the backfill; live PumpSwap for freshly graduated tokens can be added later with one small subscription per new pool.)*
+- Keep live, in-memory features for every token under 15 min old.
+- Answer "analyze this mint" in **< 2 seconds** from local data.
+- Predict rug/bundle risk, graduation probability, and 2x-before-(-50%) probability.
+- Push ranked alerts to the terminal feed.
+- Measure honestly: backtest with realistic costs → paper trade live → compare to the user's real Padre results.
+
+**Non-goals (for now)**
+- No auto-execution, no private keys, no Padre automation.
+- No reinforcement-learning market simulator.
+- No paid data.
+
+---
+
+## 3. Architecture
+
+Two processes, so the UI can restart without losing live state:
+
+```
+┌─────────────────────────── agentd (daemon, always on) ───────────────────────────┐
+│                                                                                 │
+│  Solana WS ──> recorder ──> raw events (parquet, append-only)                   │
+│                    │                                                            │
+│                    v                                                            │
+│              live state (in memory): rolling features for tokens < 15 min old    │
+│                    │                                                            │
+│   background enrichers (rate-limited, cached): RugCheck · metadata/socials ·    │
+│   website check · wallet funding · copycat · optional LLM tags                  │
+│                    │                                                            │
+│                    v                                                            │
+│              models (loaded once) ──> scorer ──> alert engine ──> paper trader   │
+│                    │                                                            │
+│   local API (localhost websocket, 127.0.0.1 only): analyze / subscribe / ask    │
+└────────────────────┬────────────────────────────────────────────────────────────┘
+                     │
+        ┌────────────┴────────────┐
+        v                         v
+   agent-tui (Textual)       optional: telegram/discord notifier (alerts only)
+   - alert feed
+   - paste box + clipboard watcher
+   - analysis panel
+   - ask <mint> <question>
+```
+
+- **Training data comes from two places that share one parser:** (1) the **backfill** of recent history (section 4.1), which is the priority for building the baseline, and (2) the live **recorder**, which keeps the data current. Backfilled and recorded events must go through the **same parser and the same schema**, so the model can't tell them apart.
+- *(Updated 2026-11-12, after Phase 1.)* Record in bursts (for example 24-hour runs) until Phase 12, then continuously from live scoring and paper trading onward. Recording is not free: about 22-54 GB of network data per day and a PC that stays on and awake. Every off period is in the gap log, and the backfill can fill any period that was not recorded (the archive is about a day behind).
+- The daemon loads models once at startup. The TUI never starts Python or loads models per request.
+- Bind the local API to `127.0.0.1` only.
+
+### 3.1 The three parts
+
+| Part | Command | Role | When it runs |
+|---|---|---|---|
+| **Engine** | `agentd` | Records live data **and** does all live analysis (live state, enrichment, scoring, alerts, paper trades). This is the "brain". | During recording bursts; always on from Phase 12 (updated 2026-11-12) |
+| **Screen** | `agent` | TUI only: shows alerts, takes pasted/copied mints, shows analysis, passes commands to `agentd`. Holds no data. | While trading/monitoring |
+| **Trainer** | `agent train` | Offline: reads backfilled + recorded data, builds features/labels, trains and evaluates models, writes versioned model files. `agentd` then loads them (`agentd reload-models`). | Weekly, or manually |
+
+Training never happens inside the live engine.
+
+### 3.2 Controlling `agentd`
+
+```
+agentd start              # turn on (recording + analysis)
+agentd stop               # turn off
+agentd status             # running? ws connected? lag, tokens/hr, credits used, gaps today, model version
+agentd pause-recording    # keep analysis running, stop writing new raw events
+agentd resume-recording
+agentd reload-models      # load newest model files without restarting
+```
+
+- **Gap log:** every period when recording was off or disconnected is written to `data/gaps.parquet` (start_ts, end_ts, reason). Training and labeling must exclude or flag tokens affected by gaps (e.g., a token created during a gap has incomplete early trades). Never treat a gap as "no tokens were launched".
+- **Auto-start (optional):** a setting to start `agentd` on login. Windows first: Task Scheduler task created by `agentd install-autostart` (and removed by `agentd uninstall-autostart`). launchd/systemd later if needed.
+- **Sleep warning:** if the PC sleeps, recording stops. On Windows, document how to set "Sleep: Never" while plugged in (Settings → System → Power), and have `agentd status` warn if the system slept since the last check. `agentd status` and the TUI status bar must show when the last gap happened. Recommend disabling sleep while recording, or running `agentd` on an always-on machine (old PC, mini PC, or a free-tier cloud VM; verify current free-tier terms first).
+- When `agentd` is off, the TUI shows "engine offline" and offers to start it.
+
+---
+
+## 4. Data sources (free tier)
+
+| Source | Use | Notes / limits (verify current docs before coding) |
+|---|---|---|
+| **Public Solana RPC WebSocket** (`api.mainnet.solana.com`, no key) | **Primary live feed:** `logsSubscribe` on the pump.fun program; parse create/buy/sell | *(Added 2026-11-12.)* Free, but "not for production": it can throttle or block without notice, so the recorder must measure its own miss rate. Limits: 100 requests / 10 s per IP, 40 connections, 100 MB / 30 s. The live source is pluggable (ordered list in `settings.yaml`). |
+| **Helius** (free plan) | RPC lookups: wallet funding, user wallet history, gap repair, audits. **Not the live firehose.** | *(Updated 2026-11-12.)* 1M credits/month, 10 RPC req/s. WebSocket data is billed at 2 credits per 0.1 MB; the pump.fun log stream measured ~18.6 GB/day (~11M credits/month), so it does not fit. Avoid `getProgramAccounts`; cache everything. |
+| **Bitquery** free sample | Historical pump.fun Parquet sample for bootstrapping and schema design | Sample only; not enough to train alone. |
+| **RugCheck** `api.rugcheck.xyz` | Mint/freeze authority, risk flags, top holders, creator balance | Free reports may be cached; respect rate limits. |
+| **DexPaprika** | Backup price/OHLCV, post-graduation pool data | Up to ~15s delayed. Analysis only. |
+| **GeckoTerminal API** | Post-graduation pool data, sanity checks | 30 calls/min keyless. |
+| **Token metadata URI** (from create event) | Name, symbol, image, description, website/X/Telegram links | Fetch once per token. |
+| **Website check** (own code) | Resolves? HTTP 200? hosting type, domain age (WHOIS) | Rate-limit; cache by domain. |
+| **X/Twitter** | Narrative | No free tier. Phase 1: link presence only. Later: optional small curated KOL list. |
+| **OpenChainBench** | Pick the lowest-latency RPC | One-time research. |
+
+Program IDs (verify on-chain before use):
+- pump.fun: `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`
+- PumpSwap: `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA`
+
+**Do not hardcode bonding-curve constants or fee rates.** pump.fun has changed them over time. Read them from the program's global config account, store them with a timestamp, and use the values that applied at each trade's time.
+
+*(Updated 2026-11-12.)* Fee tiers now live in a separate fee program (`pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ`, `FeeConfig` account), and curve parameters in the pump.fun `Global` account. Store both as timestamped snapshots read from chain (`data/config_snapshots/`), not as a hand-edited YAML file. Each trade event also records the fee rates and amounts actually charged; prefer those per-trade values wherever they exist.
+
+### 4.1 Historical training data (priority for the baseline)
+
+| Source | What it gives | Role | Notes |
+|---|---|---|---|
+| **Old Faithful** (Triton, `files.old-faithful.net`) + **Jetstreamer** (now maintained by Vaultic, `vaultic-win/jetstreamer`) | Every Solana block and transaction, one CAR archive per epoch, free | **Main baseline training set.** Backfill recent history (target 2-3 months; window set by the Phase 3 pilot), keeping only pump.fun + PumpSwap program transactions | Archives are very large. **Test one epoch first** to measure download size, disk, and parse time. Stream and filter; never store full blocks. Free hosting is "subject to change"; verify before relying on it. *(Updated 2026-11-12: an epoch is now ~1.07 days and 290-670 GB, so 2-3 months is roughly 20-40 TB of streaming. There is no server-side program filter. Jetstreamer on native Windows is unverified.)* *(Updated 2026-11-12, Phase 3: read with our own Python reader (`ingest/car.py`) instead of Jetstreamer, which needs Rust, MSVC build tools and ClickHouse and is not built for Windows. The reader uses the same per-slot index (`epoch-<E>-slot-ranges.raw`) and HTTP range requests, checks every node against its CID, and reads legacy, v0 and v1 (SIMD-0385) transactions.)* |
+| **MemeTrans** (arXiv 2602.13480, GitHub `git-disl/MemeTrans`) | 41k+ Solana memecoin launches, 200M+ transactions, bundled-account traces | Prototype and validate **Stage 1 bundle features**; cross-check our bundle-cluster logic against their labels | Older data; check license and collection dates before use. |
+| **Kaggle: Solana Skill Sprint "memecoin graduation"** | Labeled pump.fun graduation data | Prototype and test the **Stage 2** pipeline end to end; review top public solutions for feature ideas | Check competition data rules and dates. |
+| **Bitquery free Parquet sample** (`github.com/bitquery/blockchain-cloud-data-dump-sample`) | Sample pump.fun creations, migrations, trades, pools, OHLCV | Schema design and parser tests | Sample only. |
+| **Google BigQuery** public Solana data + decoded pump.fun tables (Token Terminal) | SQL access to decoded pump.fun data; 1 TB free queries/month | Optional extra volume, spot-checks of our parsed data | Check freshness first: the main Solana table has had update delays/stalls. Always filter by date to stay within the free tier. |
+| **Dune** (free tier) | Decoded pump.fun tables | Exploration and sanity checks | Free exports are limited. |
+| **MemeChain** (arXiv 2601.22185, Zenodo, CC-BY 4.0) | Off-chain artifacts (websites, logos, socials) | Feature ideas only (section 8.5) | Not used as training data (section 17). |
+
+Do **not** use for training: Coin-Meme / CoinVibe (graduated tokens only, survivorship bias), small paid "chart" datasets, small sentiment datasets.
+
+**Backfill rules**
+- Same parser and schema as the live recorder (section 5). Tag every row with `source = backfill | recorder | external`.
+- **Recency weighting:** pump.fun fees, curve parameters, migration target (Raydium → PumpSwap), and instruction formats have changed over time. Train on the most recent 2-3 months; if older data is added, down-weight it and include a "fee/curve regime" feature from the versioned config.
+- External datasets (MemeTrans, Kaggle) are for prototyping and validation, and stay out of the main training set unless their dates and mechanics match the current regime.
+- Run a **parity test**: for a period covered by both the backfill and the live recorder, the two must produce identical trades and features. *(Made precise 2026-11-12, Phase 3.)* The live feed drops some transactions and delivers a few that never landed, so the two never hold exactly the same set. The test is: (1) every row both captured (same `signature` + `event_index`) is identical in every shared column except `recv_ts` and `source`; (2) every row only the recorder has belongs to a transaction the chain has no record of; (3) rows only the backfill has are recorder misses, reported inside and outside the recorder's logged gaps but not a failure. PumpSwap rows are compared only for transactions that mention pump.fun (the live feed follows pump.fun only). Backfill rows are kept in `data/raw_backfill/` until Phase 4 decides how to merge them.
+- *(Added 2026-11-12)* **Window:** start with the most recent 2-4 weeks, then extend toward 2-3 months only if the pilot shows the bandwidth, time, and disk cost are acceptable. Ask the user before each extension (large download).
+- *(Added 2026-11-12)* **Regime changes inside the window:** pump.fun changed layouts on 2026-09-12 (holder-rewards fields), 2026-09-30 (PumpSwap negative virtual reserves), 2026-10-07 (v3 trades, fees kept on the curve, synthetic migration, pump coins as quote mints), and 2026-10-13 (depth-2 quote coins). The parser must decode every regime in the window, with a test transaction from each.
+- *(Added 2026-11-12)* **Backfill-only fields:** priority fee, Jito tip, and position within a slot exist only in full transactions, not in the live log stream. Store them as nullable, tag them backfill-only, and keep them out of model features unless the live path can supply the same values (otherwise training and live scoring would disagree).
+
+---
+
+## 5. Data model (raw events)
+
+Append-only Parquet, partitioned by date. Query with DuckDB.
+
+*(Updated 2026-11-12, after Phase 1.)* Each on-chain event has its own table, and its columns keep the names pump.fun uses in its IDL files, so the parser holds no layout of its own. One rename: `user` is stored as `wallet` (a reserved word in SQL). Every event table also has `signature`, `event_index` (position among the transaction's pump.fun events), `slot`, `ts` (on-chain event time; use it for cutoffs), `recv_ts` (when the recorder saw it; empty for backfill), `source`, `event`, and `extra_hex` (bytes the IDL copy does not describe yet).
+
+- `tokens` (CreateEvent): mint, creator, name, symbol, uri, bonding_curve, quote_mint, starting reserves, token program, mayhem and holder-reward flags, creator_fee_bps. Metadata contents and socials come later from the metadata enricher (8.5).
+- `trades` (bonding-curve TradeEvent): mint, wallet, is_buy, sol_amount, quote_mint, quote_amount, token_amount, virtual and real reserves after the trade, fee and creator-fee rates and amounts as charged, ix_name, and derived `is_creator`. priority_fee and jito_tip are backfill-only (nullable; see 4.1).
+  - *(Updated 2026-11-12.)* `quote_mint` + `quote_amount` because coins can now be paired with SOL, USDC, or another pump coin (`sol_amount` is 0 for those). Record every coin; build labels and models on SOL-paired coins first.
+- `curve_completes` (CompleteEvent) and `post_complete_buys` (PostCompleteBuyEvent): the bonding curve finishing, and the part of a completing buy priced on the future pool.
+- `amm_trades` (PumpSwap BuyEvent and SellEvent, with derived `is_buy`) and `amm_pools` (CreatePoolEvent): trading after graduation, kept apart from bonding-curve trades.
+- `truncated_txs`: transactions whose logs the node cut short; their events may be incomplete and are repaired from the backfill.
+- `wallet_funding`: wallet, first_funder, funding_ts, funding_amount (cached)
+- `enrichment`: mint, rugcheck_json, website_status, domain_age_days, host_type, fetched_ts
+- `migrations` (CompletePumpAmmMigrationEvent): mint, pool, bonding_curve, timestamp (the graduation time), amounts moved into the pool
+- `my_trades`: the user's own wallet trades (pulled from chain via public address)
+- `alerts` and `analyses`: everything the agent showed, with timestamps and scores (for later evaluation)
+
+- `gaps`: start_ts, end_ts, reason (recorder off, disconnect, backfill missing range)
+
+Every row needs a timestamp so features can be cut off at decision time, plus a `source` column (`backfill | recorder | external`).
+
+---
+
+## 6. Decision times and lookahead rule
+
+**Training snapshots:** one feature snapshot per token at **T+30s, T+60s, T+120s, T+300s** after creation (T = create slot time).
+
+**On-demand analysis:** uses the live state at the moment of the request; record `token_age_s` and pass it to the model as a feature so it matches training.
+
+**Hard rule:** a snapshot at T+k may only use events with `ts <= T+k`. Enrichment fetched after T+k is not allowed for that snapshot unless it is static and known at creation (e.g., metadata URI contents). Write a unit test that fails if any feature reads data past its cutoff.
+
+---
+
+## 7. Labels
+
+All thresholds live in `config/labels.yaml`.
+
+**Stage 1: rug / bundle**
+- `is_rug`: within 60 min of creation, creator + linked wallets sell ≥ 50% of their holdings **and** price falls ≥ 80% from peak.
+- `is_dead`: no trades after T+30 min (pump.fun-speed version of the MemeChain paper's "One-Day Meme Coin").
+- `is_bundled`: at T+60s, the bundle cluster (8.2) holds ≥ 20% of supply.
+- Target: `bad = is_rug OR is_dead OR is_bundled`. Option later: survival model (time-to-death).
+
+**Stage 2: graduation**
+- `graduates_1h`: completes the bonding curve within 60 min of creation.
+
+**Stage 3: 2x before -50%**
+- Entry price = curve price at decision time **+ latency delay** (default 5s) **+ price impact of the position size**.
+- `hit_2x`: price reaches 2x entry before 0.5x entry within 60 min; otherwise 0.
+
+**Stage 4: filter-then-rank**
+- Not a new label. Score = P(not bad) × expected value from stages 2-3, after costs. Evaluate as a ranking per hour.
+
+---
+
+## 8. Features (computed at the cutoff)
+
+### 8.1 Dev / creator
+- Prior pump.fun launches: count, % rugged/died, % graduated, median lifetime
+- Creator buy at launch (SOL, % of supply), current holding %, sold yet, % sold
+- Wallet age and funding source (fresh wallet funded minutes ago = red flag)
+
+### 8.2 Bundlers / snipers
+- Buys in the create slot; buys in the first 1-3 slots. *(Updated 2026-11-12: slots are now ~215 ms, not 400 ms, so also compute these over fixed time windows: first 0.5 s, 1 s, 2 s.)*
+- Bundle cluster: early buyers sharing a funder within 24h, or funded with identical SOL amounts from one source
+- Cluster supply %, cluster size, Jito-tip presence on early buys *(backfill-only: offline analysis, not a model feature; see 4.1)*
+- Known sniper-bot wallets (from the wallet label DB, 8.6)
+
+### 8.3 Holders
+- Unique holders, top-1 / top-10 %, holder growth rate, fresh-wallet share
+
+### 8.4 Trade flow and curve
+- Buy/sell counts and SOL volume (total and last 30s), net SOL flow
+- Buy-size distribution (median, max), unique buyers per minute
+- Curve progress %, progress velocity, price change since creation
+- Largest single sell as % of supply
+
+### 8.5 Off-chain effort (from the MemeChain paper)
+- Has image / description / website / X / Telegram
+- Website is a real domain vs. a redirect to Telegram/X/pump.fun
+- Resolves and returns HTTP 200; hosting type (custom domain vs. vercel.app / canva.site / other builders)
+- Domain age, registrar
+- Domain or X handle reused by other recent tokens (serial-scam / copycat signal)
+
+### 8.6 Wallet label DB (the long-term edge)
+`wallet_labels(wallet, label, evidence, updated_ts)` with labels like `rugger`, `bundler_cluster:<id>`, `sniper_bot`, `profitable_trader`, `kol`. When used as features, labels may only use evidence from before the snapshot cutoff.
+
+**Seed it from the backfill.** Months of history let the agent recognize serial ruggers, repeat devs, bundler clusters, and consistently profitable wallets before going live. This is the single biggest boost to the baseline. Store each label with the date it first became knowable, so training only uses labels that existed at each snapshot time.
+
+### 8.7 Copycat / narrative
+- Name/ticker similarity to tokens created in the last 6h (near-duplicate count, position in its "family")
+- Image perceptual-hash similarity to recent tokens
+- Meme keyword category (animal, AI, political, celebrity, etc.) and that category's recent launch/graduation rate
+- Optional LLM tag (narrative + "riding a current trend?"), cached by mint, never required
+
+### 8.8 Market context
+- SOL price change over 1h; pump.fun launches and graduations per hour
+
+### 8.9 Trusted wallets (user-supplied traders and friends)
+
+The user will later supply public wallet addresses of traders they believe are consistently profitable, including friends who agree to share. Build this in **Phase 6**, after the backfill, so every wallet can be verified against history.
+
+**File:** `config/trusted_wallets.yaml` (gitignored; never shipped with the app)
+```yaml
+- address: <PUBLIC_WALLET_ADDRESS>
+  name: friend_a            # nickname only
+  source: friend            # friend | kol | found_onchain | other
+  style: sniper             # sniper | holder | mixed | unknown
+  consent: true             # required for friends
+  added: 2026-11-12
+  notes: "trades first 15 min, tight stops"
+```
+- **Public addresses only.** Never accept, request, or store private keys or seed phrases.
+- Optional companion file `config/trusted_wallet_notes.csv` (mint, wallet, side, ts, reason) for trades where the trader wrote down *why* they bought or sold.
+
+**Verification (`agent wallets verify`)**, run against backfilled + recorded data, before a wallet is used anywhere:
+- Number of pump.fun trades, win rate, median and total after-cost P&L, max drawdown
+- Consistency: profitable across most weeks or months, not driven by 1-3 outlier wins
+- Style check: typical hold time and entry age (seconds after launch) vs. our 0-15 min window
+- Behavior flags: buys that move the price a lot (being followed / exit-liquidity risk), signs of wallet rotation or coordinated wallets
+- Output: `verified | unverified | rejected`, with the stats, stored in `wallet_labels` with a "knowable-from" date
+
+**Discovery (`agent wallets discover`):** rank all wallets in the backfill by consistent after-cost profitability within the 0-15 min window. The user's list is a seed and cross-check; discovered wallets are proposed to the user for approval, never auto-trusted.
+
+**How verified wallets are used**
+1. **Features:** count of verified trusted wallets that bought before the snapshot cutoff, their combined SOL size, how early they entered, and whether any have already sold.
+2. **Labels:** their entries and exits as extra weak labels ("a skilled trader bought here") alongside the main labels. Down-weight so no single trader dominates.
+3. **Later (optional):** a per-trader "trades like X" model, only if that trader has enough trades (several hundred+) in our style.
+
+**Rules**
+- Lookahead: a wallet's "verified" status and stats may only use trades before each snapshot's cutoff.
+- Privacy: friends' wallets are only used with consent, stay out of logs shared with others, and are never included in a shared wallet-label snapshot (section 14) without permission.
+- Re-verify monthly; demote wallets whose performance falls off.
+
+### 8.10 Mayhem-mode coins *(added 2026-11-12, after Phase 2)*
+
+About a fifth of new coins are in pump.fun's mayhem mode: pump.fun's own agent wallet trades them (about 22% of all bonding-curve trades in Phase 2's sample), fee-free and priced by the mayhem program, and resets their reserves between trades.
+- **Their own category:** `is_mayhem` (from the create event) is a feature, and label rates and model metrics are reported separately for mayhem and ordinary coins. If the two behave very differently, train a separate model for mayhem coins.
+- **The agent's trades stay in** the data, the features and the labels. Each trade is flagged if the mayhem agent made it (the agent's wallet comes from the IDL, never hardcoded), so features can also show how much of a coin's activity is the agent's (for example its share of buy volume).
+- Curve state for mayhem coins uses the recorded reserve resets (`mayhem_params`).
+
+---
+
+## 9. Modeling
+
+- One LightGBM model per stage, with `token_age_s` / snapshot time as a feature.
+- **Split by time, never randomly.** Train on older weeks, validate on the next, test on the most recent. Walk-forward retraining.
+- Class weights for imbalance; isotonic calibration on validation.
+- Metrics:
+  - Stage 1: PR-AUC, recall of bad tokens at a fixed false-positive rate
+  - Stages 2-3: PR-AUC, precision at top-k alerts per hour, calibration curve
+  - Stage 4: average after-cost P&L per alert, hit rate, max drawdown on the paper ledger
+- Baselines to beat: (a) "everything that passes RugCheck", (b) a hand-written rules filter. If the model can't beat the rules, ship the rules.
+- SHAP for every model; a suspicious top feature usually means leakage.
+- Export models as files with a version + training-date manifest, so they can ship with the app (section 14).
+
+---
+
+## 10. Backtest rules
+
+- Fills use **exact bonding-curve math** from reserves at fill time (price impact of the simulated size).
+- Apply pump.fun fees (the per-trade fee fields recorded on chain, or the timestamped chain snapshots; see section 4), Padre-side settings from `padre_presets.yaml` (slippage, priority fee), and a failed-transaction rate.
+- Entry delay: default 5s after the alert/analysis; test 2s / 5s / 10s.
+- Exits mirror the user's Padre presets: take-profit, stop-loss, time stop.
+- Report weekly to check stability.
+- *(After Phase 2.)* Mayhem coins (8.10): the mayhem agent's trades stay in the simulated market, curve state uses the recorded reserve resets, and results are reported separately for mayhem and ordinary coins.
+
+---
+
+## 11. Paper trading and real-trade feedback
+
+- Every alert gets a simulated entry (delay + impact) and simulated exits under the Padre presets.
+- Ledger: `paper_trades(mint, alert_ts, entry_ts, entry_price, exit_ts, exit_price, reason, pnl_sol)`.
+- Pull the user's real Padre trades from chain (`my_trades`) and join them to what the agent showed at the time.
+- Daily summary in the TUI: **backtest vs. paper vs. real** P&L per trade. The gaps between these are the key health metrics.
+
+---
+
+## 12. Terminal app (TUI)
+
+### 12.1 Layout
+```
+┌ ALERTS (live) ───────────────────────────────────────────────────────────┐
+│ 12:04:31  <MINT>  $TICK  T+60s  risk .12  grad .41  2x .28  #2/hr         │
+│ 12:03:58  <MINT>  $FOO   T+120s risk .09  grad .55  2x .31  #1/hr         │
+├ ANALYZE ─────────────────────────────────────────────────────────────────┤
+│ > paste mint (or just copy it in Padre)                                   │
+│                                                                           │
+│ <MINT>  $TICK · age 74s · curve 34% · data as of 2s ago                   │
+│ RISK 0.12 (low)   GRAD 0.41   2x 0.28                                     │
+│ + dev: 0 prior rugs, 3 graduations, has not sold                          │
+│ + 6 profitable wallets in                                                 │
+│ - top10 holds 38% · bundle cluster 11%                                    │
+│ … enrichment: RugCheck ok · mint/freeze revoked · no website (X only)     │
+├ STATUS ──────────────────────────────────────────────────────────────────┤
+│ ws: connected · lag 0.4s · tokens/hr 1,820 · credits used 41% · model v3  │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### 12.2 Two-stage on-demand analysis
+1. **Fast reply (target < 1-2s):** read live state from memory → score with loaded models → show scores + top reasons. No network calls.
+2. **Enrichment reply (a few seconds):** RugCheck, missing wallet-funding lookups, website/socials check, optional LLM take. Runs in parallel and updates the panel when ready.
+- Always show **data age** ("as of 2s ago"); first-minute data goes stale fast.
+- **Unknown mint** (created before the recorder started, or missed during a disconnect): show "backfilling…", fetch its trades from RPC, then score. Show a warning that this is slower and uses credits.
+
+### 12.3 Clipboard watcher
+- Polls the clipboard (e.g., every 200ms) and auto-analyzes when it sees a valid Solana mint address (base58, 32-44 chars). *(Updated 2026-11-12, after Phase 1. Ending in `pump` is only a weak hint: in a sample only 56% of new pump.fun mints did. Confirm a mint against local data or the chain.)*
+- Toggle on/off with a hotkey. Ignore repeats of the same mint.
+- **Windows first** (user's OS). Use a library that works natively on Windows (e.g., `pyperclip` or `pywin32`); test that it doesn't conflict with the browser running Padre. macOS/Linux support is a later nice-to-have.
+
+### 12.4 Commands
+- `<mint>`: analyze
+- `ask <mint> <question>`: slow LLM explanation using the current features (e.g., "why is risk high?")
+- `watch <mint>`: re-score every few seconds and flag big changes (dev sold, cluster dumped)
+- `mute <mint>` / `filter <expr>`: control the alert feed
+- `stats`: backtest vs. paper vs. real summary
+
+### 12.5 Speed rules
+- Keep rolling features for all tokens < 15 min old updated in memory on every trade.
+- Pre-fetch wallet funding for early buyers in the background **before** the user asks.
+- No LLM, no outside API calls in the fast path.
+- Log end-to-end latency for every analysis (request → fast reply, request → enrichment) and show the median in the status bar.
+
+### 12.6 Optional remote alerts (later)
+- A small notifier that subscribes to the daemon's alert stream and forwards to Telegram or Discord, for when the user is away from the laptop. Alerts only, mint first.
+
+---
+
+## 13. Repo layout
+
+```
+memecoin-agent/
+  config/          settings.yaml, labels.yaml, padre_presets.yaml, readiness.yaml,
+                   trusted_wallets.yaml + trusted_wallet_notes.csv (gitignored, never shipped)
+  src/agent/
+    daemon/        main.py, local_api.py, live_state.py
+    ingest/        ws_client.py (pluggable live source), logs.py, parsers.py (shared by live + backfill), recorder.py, backfill.py (RPC gap fill),
+                   car.py (Old Faithful CAR reader), oldfaithful_extract.py + oldfaithful_backfill.py (range download → filter pump.fun → parsers; updated 2026-11-12), gaps.py
+    datasets/      memetrans.py, kaggle_graduation.py, bitquery_sample.py, bigquery_export.py (importers to our schema)
+    cli/           agentd commands (start/stop/status/pause/resume/reload-models), agent train, agent backfill
+    enrich/        rugcheck.py, metadata.py, website.py, funding.py, copycat.py, llm_tags.py
+    features/      build_snapshot.py, feature_defs.py, live_features.py
+    labels/        make_labels.py
+    models/        train.py, evaluate.py, calibrate.py, registry.py
+    sim/           curve_math.py, backtest.py, paper_trader.py
+    tui/           app.py, widgets.py, clipboard.py
+    notify/        telegram.py (optional)
+    db/            duckdb helpers, wallet_labels.py, my_trades.py
+  models/          shipped model files + manifest.json
+  data/            raw/, features/, labels/, config_snapshots/ (fee + curve parameters read from chain) (gitignored)
+  notebooks/       EDA only
+  tests/           test_no_lookahead.py, test_curve_math.py, test_parsers.py, test_mint_detect.py,
+                   test_backfill_parity.py (backfill vs recorder produce identical rows), test_gaps.py
+  .env.example     HELIUS_API_KEY, MY_WALLET_PUBLIC_ADDRESS, ANTHROPIC_API_KEY (optional), TELEGRAM_* (optional)
+  pyproject.toml   console scripts: agentd, agent (incl. agent train, agent backfill)
+```
+
+Never commit `.env`, data, or anyone's keys.
+
+---
+
+## 14. Packaging and sharing
+
+- Install: `pipx install git+<repo-url>` (or clone + `pip install -e .`). Two commands: `agentd` (daemon) and `agent` (TUI).
+- First run: an `agent setup` wizard creates `.env`, checks the Helius key and the WebSocket connection, and creates the data folders.
+- **Each user brings their own free API keys.** Never ship or share keys; free-tier limits are per key.
+- **Each user records their own data** on their own machine.
+- Ship with: trained model files + manifest (version, training dates, feature list), and optionally a wallet-label snapshot so new users get useful scores on day one. **Exclude** `trusted_wallets.yaml`, friends' wallets, and the user's own wallet from anything shipped. Auto-check for newer model files on startup (optional).
+- No private keys anywhere, ever. This is what makes the app safe to hand to others.
+- Include a clear **"not financial advice"** notice in the README and on first launch.
+- Keep distribution private or small: if many people act on the same alerts, they crowd each other out and the edge shrinks. If it's ever sold as a paid signal service, check the regulatory side first.
+
+---
+
+## 15. Phases and acceptance criteria
+
+Priority order: **parser → recorder → historical backfill → train a strong baseline → paper trade → go live.** Live-recorded data supplements the baseline; it is not the starting point.
+
+| Phase | Build | Done when |
+|---|---|---|
+| **0. Setup** | Repo, config, `.env`, Helius key (optional; the live feed uses the public WebSocket), `agentd` start/stop/status | Daemon connects and prints live create/trade events |
+| **1. Parser + recorder** | One shared parser for pump.fun + PumpSwap; live recorder on the bonding curve (PumpSwap from the backfill; updated 2026-11-12); store tokens/trades; reconnect; gap log | 24h run with < 1% missed tokens (spot-check against an explorer); gaps logged |
+| **2. Curve math + tests** | Price/impact from reserves; fee/curve versioning | Simulated prices match on-chain trade prices within tolerance |
+| **3. Backfill pilot** | Old Faithful for **one epoch** (own reader instead of Jetstreamer; updated 2026-11-12), filtered to pump.fun/PumpSwap, through the shared parser | Measured download size, disk use, and parse time per epoch; **parity test** passes against the recorder for an overlapping period |
+| **4. Full backfill** | Window chosen from the pilot: most recent 2-4 weeks first, extended toward 2-3 months if the cost allows | Complete coverage with gaps logged; storage and run time documented |
+| **5. External datasets** | Importers for MemeTrans, Kaggle graduation, Bitquery sample | Bundle-cluster logic checked against MemeTrans labels; Stage 2 pipeline runs end to end on Kaggle data |
+| **6. Wallet-label DB + trusted wallets** | Seed from backfill: ruggers, repeat devs, bundler clusters, profitable wallets (with "knowable-from" dates). Add `trusted_wallets.yaml` support, `agent wallets verify` and `agent wallets discover` (section 8.9) | Labels available with no future leakage; user-supplied wallets verified with stats; discovered wallets proposed to the user |
+| **7. Enrichers** | RugCheck, metadata, website, funding (with background pre-fetch), copycat | Cached; inside free-tier limits. Note: historical tokens get only the enrichment still recoverable (on-chain + metadata URI); mark live-only features as missing in training |
+| **8. Features + labels** | Snapshots at T+30/60/120/300s; labels per section 7 | No-lookahead test passes; label rates look plausible |
+| **9. Stage 1 model** | Rug/bundle filter, trained on the backfill | Walk-forward results meet the readiness criteria (15.1) for Stage 1 |
+| **10. Stages 2-3** | Graduation and 2x models | Calibrated; beat baselines on the most recent month |
+| **11. Backtest** | Full cost model with Padre presets | Monthly and weekly results with delay sensitivity |
+| **12. Live state + TUI** | In-memory rolling features, terminal app, clipboard watcher, two-stage analysis | Copy-to-verdict < 1-2s; enrichment arrives in a few seconds |
+| **13. Paper trading + real-trade tracking** | Alert feed, paper ledger, `my_trades` from chain | Runs **4-8 weeks** across different market conditions |
+| **14. Stage 4 ranker** | Filter-then-rank | Meets all readiness criteria (15.1) |
+| **15. Packaging** | `pipx` install, setup wizard, model manifest, README | Fresh install works on a clean Windows PC (macOS optional) |
+| **16. Ongoing** | Weekly retrain (backfill + recorder data, recency-weighted), wallet-label growth, optional remote alerts | Drift monitored (feature distributions, hit rate, latency) |
+
+### 15.1 Readiness criteria (decide before seeing results; do not loosen later)
+
+The agent is "ready for real money" only when **all** hold on out-of-time data (the most recent month that the model never trained on) **and** during paper trading:
+
+- **Stage 1:** catches ≥ 90% of bad tokens (rug/dead/bundled) while blocking ≤ 30% of tokens that turned out fine.
+- **Stages 2-3:** beat the rules baseline on PR-AUC and on precision at the top alerts per hour; calibration error within a set tolerance.
+- **Backtest vs. paper gap:** paper P&L per alert is at least half of backtest P&L per alert (a bigger gap means the backtest is lying).
+- **Paper trading:** positive after-cost P&L per alert for **4+ consecutive weeks**, with max drawdown inside a set limit.
+- **Stability:** no single week accounts for most of the profit; results hold in both busy and quiet weeks.
+- **Operations:** recorder uptime ≥ 95% over the paper period; copy-to-verdict median < 2s.
+
+Store these thresholds in `config/readiness.yaml`; `agent train` and the TUI `stats` command report pass/fail for each.
+
+### 15.2 Suggested timeline
+
+| When | What |
+|---|---|
+| Week 1 | Phases 0-2; one 24-hour recording run (updated 2026-11-12: bursts, not continuous) |
+| Weeks 2-3 | Phase 3 (backfill pilot), then start Phase 4 (full backfill) |
+| Weeks 3-5 | Phases 5-8: external datasets, wallet-label DB, enrichers, features + labels |
+| Weeks 5-7 | Phases 9-11: train stages 1-3, walk-forward tests, backtest |
+| Weeks 7-8 | Phase 12: terminal app |
+| Weeks 8-16 | Phases 13-14: paper trading + weekly retrains; check readiness criteria |
+| After | If all criteria pass: small real trades on Padre; keep retraining |
+
+*(Updated 2026-11-12, after Phase 1.)* The recorder runs in bursts until Phase 12 and continuously from then on, so paper trading adds several weeks of continuous live data on top of the backfill.
+
+---
+
+## 16. Known risks and pitfalls
+
+- **Lookahead leakage** is the #1 failure mode. Enforce cutoffs in code and tests.
+- **Survivorship bias:** keep every token, especially the dead ones.
+- **Latency on free tier:** the agent will lag paid bots by seconds. Measure it; don't trust backtest fills blindly.
+- **PC must be on and awake** while recording (in bursts now, continuously from Phase 12); gaps in recording mean missing data and slow backfills. Log every gap. *(Updated 2026-11-12, after Phase 1.)*
+- **Stale history:** older pump.fun data reflects older fees, curves, and migration paths. Backfill recent months; down-weight older data.
+- **Backfill vs. live mismatch:** if the backfill parser and live parser differ even slightly, the model learns patterns that don't exist live. The parity test is mandatory.
+- **Missing enrichment for historical tokens:** websites and some APIs can't be reconstructed for past dates. Mark those features as missing in training instead of filling them with today's values (that would be lookahead).
+- **Backfill size:** Old Faithful archives are very large; stream and filter, measure on one epoch first, and check free disk space.
+- **Adversarial drift:** ruggers and bundlers adapt. Retrain often and watch for drops.
+- **Free-tier limits:** cache aggressively; skip enrichment instead of crashing.
+- **pump.fun fee/curve/instruction changes:** versioned config and parsers, never hardcoded.
+- **Padre changes:** irrelevant to the agent by design (no Padre dependency), but keep `padre_presets.yaml` in sync with the user's real settings.
+- High-risk market. Real money only after a sustained positive paper record, and only amounts the user can afford to lose.
+
+---
+
+## 17. Reference: MemeChain paper (arXiv 2601.22185)
+
+Mongardini & Mei, *MemeChain: A Multimodal Cross-Chain Dataset for Meme Coin Forensics and Risk Analysis* (2026). Dataset on Zenodo, CC-BY 4.0.
+
+Used for:
+- Off-chain effort features (8.5): missing logo, no real website, unreachable site, cheap hosting, budget registrars, domain reuse across tokens.
+- "One-Day Meme Coin" as a failure label and survival analysis as an option (7, Stage 1).
+- Meme keyword categories for narrative features (8.7).
+
+Not used as training data: single Oct 2024 snapshot, aggregator-sourced (survivor-biased for Solana: only 0.09% one-day coins), no trade-level data. Note: Table 4 swaps the Ethereum and Solana token counts relative to the text.
+
+---
+
+## 18. Open items to verify before coding
+
+- [ ] Helius free-tier credits/RPS, and whether `logsSubscribe` on the pump.fun program fits within them
+- [ ] Current pump.fun create/buy/sell instruction layouts and event formats (versions such as `create_v2`)
+- [ ] RugCheck free endpoints and rate limits
+- [ ] Bitquery free sample scope
+- [ ] Old Faithful: current free hosting status, per-epoch CAR size, Jetstreamer version and filtering options, download speed on the user's connection
+- [ ] MemeTrans and Kaggle dataset licenses, date ranges, and whether their pump.fun mechanics match the current regime
+- [ ] BigQuery Solana/pump.fun tables: current freshness and table names
+- [ ] Free disk space on the machine running `agentd`, and whether to use an always-on machine for recording
+- [ ] pump.fun fee schedule and curve parameters from the on-chain global account
+- [ ] Clipboard library behavior on Windows (primary); macOS/Linux later
+- [ ] Windows Terminal rendering of the Textual TUI; Task Scheduler auto-start; long-path and file-lock behavior for Parquet/DuckDB on Windows
+- [ ] User's Padre settings to fill `padre_presets.yaml` (slippage, priority fee, typical TP/SL, typical buy size)
+
+---
+
+## 19. Change log
+
+**2026-11-12** (after the section 18 verification; evidence in `docs/PROGRESS.md`). Every edit is marked in place with this date.
+
+1. **Live feed (3, 4, 13, 15):** the public Solana WebSocket is the primary live source; Helius is for RPC lookups only, because its free credits cannot carry the pump.fun log stream.
+2. **Backfill window (0, 4.1, 15):** 2-3 months stays the target, but the Phase 3 pilot sets the actual window, starting with 2-4 weeks. Jetstreamer is now maintained by Vaultic.
+3. **Trade schema (5):** `sol_amount` became `quote_mint` + `quote_amount`; per-trade fee fields, instruction name and venue added. SOL-paired coins are modeled first.
+4. **Backfill-only fields (4.1, 5, 8.2):** priority fee, Jito tip and in-slot position are nullable and kept out of model features.
+5. **Regime changes (4.1):** the four pump.fun layout changes between 2026-09-12 and 2026-10-13 are listed; the parser must cover each.
+6. **Slot timing (8.2):** early-buy features are also computed over fixed time windows, since slots are now ~215 ms.
+7. **Fees (4, 10, 13):** fee and curve parameters are timestamped snapshots read from chain, not a hand-edited `fees.yaml`; per-trade recorded fees are preferred.
+
+**2026-11-12, after Phase 1** (approved by the user; evidence in `docs/PROGRESS.md`, Phase 1). Marked in place with "after Phase 1" or "updated 2026-11-12".
+
+8. **Event tables (5):** each on-chain event has its own table with pump.fun's IDL column names (`user` stored as `wallet`). Bonding-curve and PumpSwap trades are separate tables (`trades`, `amm_trades`) instead of one table with a venue column.
+9. **Live coverage (2, 15):** the live recorder covers the bonding curve only; PumpSwap history comes from the backfill, because its live stream is about 83 GB/day.
+10. **Mint check (12.3):** a mint ending in `pump` is a weak hint, not a rule (56% in a sample).
+11. **Recorder schedule (3, 3.1, 15.2, 16):** record in bursts until Phase 12 and continuously from then on, since recording costs 22-54 GB of network data per day.
+
+**2026-11-12, Phase 3** (approved by the user with the Phase 3 plan; evidence in `docs/PROGRESS.md`, Phase 3). Marked in place with "Phase 3".
+
+12. **Backfill reader (4.1, 13, 15):** Old Faithful is read with the project's own Python reader instead of Jetstreamer (Rust, MSVC build tools and ClickHouse; not built for Windows). Same archive, same per-slot index, HTTP range requests.
+13. **Parity test (4.1):** "identical trades" made precise: identical shared columns for rows both captured, recorder-only rows must be off chain, backfill-only rows reported as recorder misses.
+
+**2026-11-12, after Phase 2: mayhem coins** (decided by the user; evidence in `docs/PROGRESS.md`, Phase 2). Marked in place with "after Phase 2".
+
+14. **Mayhem coins (8.10, 10):** treated as their own category (`is_mayhem` feature, results reported separately, a separate model if needed). The mayhem agent's trades are kept everywhere, flagged per trade; the proposal to leave them out of backtests was declined.

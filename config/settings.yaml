@@ -1,0 +1,86 @@
+# Non-secret settings. Secrets (API keys) live in .env only.
+
+# Program IDs, confirmed executable on mainnet on 2026-11-12.
+programs:
+  pump: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+  pump_amm: pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
+
+live:
+  commitment: confirmed
+  # Which programs (keys from `programs` above) to follow live.
+  subscribe: [pump]
+
+  # Live sources, tried in this order. If one fails or goes quiet, the next is used.
+  # ${NAME} is filled in from .env. A source whose value is missing is skipped.
+  sources:
+    - name: solana-public
+      ws_url: wss://api.mainnet.solana.com
+    - name: solana-public-legacy
+      ws_url: wss://api.mainnet-beta.solana.com
+    # Helius bills WebSocket data at 2 credits per 0.1 MB. The full pump.fun stream would
+    # use the free 1M monthly credits in under 3 days, so this stays off.
+    - name: helius
+      ws_url: wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}
+      enabled: false
+
+  reconnect:
+    initial_s: 1
+    max_s: 30
+  # Reconnect if no message arrives for this long (the stream normally sends ~130 per second).
+  stale_after_s: 20
+
+recorder:
+  # Rows are held in memory and written to Parquet this often. If the engine is killed
+  # (not stopped), up to this many seconds of data are lost and logged as a gap.
+  flush_interval_s: 60
+  # Recording stops, and a gap is logged, when the data drive has less free space than this.
+  min_free_gb: 5
+  # Length of one recording burst. `agentd status` shows a bar toward it.
+  goal_hours: 24
+  # A break at least this long (in the gap log) starts a new burst; shorter ones, such
+  # as a restart, count toward the same burst.
+  session_break_hours: 1
+
+dataset:
+  # Days of pump.fun history wanted for a first model (spec 4.1: start with 2-4 weeks,
+  # target 2-3 months). `agentd status` shows a bar toward it. Most of it will come
+  # from the backfill (Phases 3-4); live recording adds the rest.
+  target_days: 28
+  # Download needed per day of history from the backfill archive (the whole blockchain
+  # is downloaded and only pump.fun is kept). Estimated from the archive's file sizes
+  # on 2026-11-12 (290-390 GB per ~1.07 days); the Phase 3 pilot measures it.
+  backfill_gb_per_day: 310
+
+# History from Old Faithful (`agent backfill`, spec 4.1). The archive has no filter, so
+# a whole epoch (about 1.07 days, ~400 GB) is downloaded and only pump.fun is kept.
+backfill:
+  base_url: https://files.old-faithful.net
+  # Processes downloading and decoding at once. This PC has 6 cores; each decodes
+  # about 40 MB/s, so 6 keep up with any speed the line can give.
+  workers: 6
+  # Download speed limit in MB/s for all workers together (0 = no limit). 80 MB/s is
+  # about 640 Mbps: most of a 900 Mbps line, with room left for the live recorder.
+  max_mb_s: 80
+  # Slots per download request (about 60 MB) and how many finished chunks are written
+  # at a time. A stopped run repeats at most the chunks not yet written.
+  chunk_slots: 64
+  commit_chunks: 64
+
+# HTTP RPC used for lookups such as `agent audit`. The public endpoint needs no key.
+rpc:
+  url: https://api.mainnet.solana.com
+  max_rps: 3
+
+chain:
+  # How often the engine saves pump.fun's curve parameters and fee schedule from chain
+  # (data/config_snapshots/). Each snapshot is two small reads from the public RPC.
+  snapshot_every_hours: 6
+  # Quote mints pump.fun's fee program treats as SOL, and as stablecoins. Both lists are
+  # fixed inside its program, so no account holds them. Source: pump-fun/pump-sdk 4.1.0,
+  # src/fees.ts (SOL_LIKE_QUOTE_MINTS, STABLE_QUOTE_MINTS), read 2026-11-12.
+  sol_like_quote_mints:
+    - "11111111111111111111111111111111"           # all-zero key: SOL on a curve's record
+    - So11111111111111111111111111111111111111112  # wrapped SOL
+    - 9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP  # Token-2022 native SOL
+  stable_quote_mints:
+    - EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v  # USDC

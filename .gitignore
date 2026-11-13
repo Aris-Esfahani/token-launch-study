@@ -1,0 +1,28 @@
+# --- secrets and private lists: never commit ---
+.env
+.env.*
+!.env.example
+config/trusted_wallets.yaml
+config/trusted_wallet_notes.csv
+
+# --- recorded data ---
+data/
+*.parquet
+*.duckdb
+*.duckdb.wal
+
+# --- python ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# --- editor / OS ---
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

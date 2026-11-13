@@ -1,0 +1,91 @@
+{
+ "signature": "2EgSaGXJjELYvqMhuBeNevYw2Dvw7vHgFwoJ5t7DxzvWfVfHeFaBdaXpHJ69sp6KxU5a2sNmTPZ9E5bzHYaRC1e7",
+ "slot": 468508353,
+ "blockTime": 1794482859,
+ "version": "legacy",
+ "err": null,
+ "fee": 5080,
+ "accountKeys": [
+  "svLDjw4hrwG7BGkczqHJD2k6GoPmUADESKCy9j9ajjH",
+  "AtcpZCNARgKtiFqDEdXpT1in7MzbUFjStMU7phRcCiZK",
+  "11111111111111111111111111111111",
+  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+  "ComputeBudget111111111111111111111111111111",
+  "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"
+ ],
+ "loadedAddresses": {
+  "readonly": [],
+  "writable": []
+ },
+ "instructions": [
+  {
+   "accounts": [],
+   "data": "HN9tQF",
+   "programIdIndex": 4,
+   "stackHeight": 1
+  },
+  {
+   "accounts": [],
+   "data": "3tGNFMqHiozw",
+   "programIdIndex": 4,
+   "stackHeight": 1
+  },
+  {
+   "accounts": [
+    0,
+    1,
+    2,
+    5,
+    3
+   ],
+   "data": "7E9g4XZrCjE",
+   "programIdIndex": 3,
+   "stackHeight": 1
+  },
+  {
+   "accounts": [
+    0,
+    1,
+    5,
+    3
+   ],
+   "data": "ihFZiQrP7CM",
+   "programIdIndex": 3,
+   "stackHeight": 1
+  }
+ ],
+ "innerInstructions": [
+  {
+   "index": 3,
+   "instructions": [
+    {
+     "accounts": [
+      5
+     ],
+     "data": "2qWhKzSZDTHiG5o2YQAAcRXNVv9RhfNPvcRACPs7ZrKZ7fKQDap5rVHjr1f7Ym1MZLS9DocHAD5vAT1gev25QY35cmJwT7gnaShRQwiof2tWqCeZG17xHKEa3",
+     "programIdIndex": 3,
+     "stackHeight": 2
+    }
+   ]
+  }
+ ],
+ "logMessages": [
+  "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+  "Program ComputeBudget111111111111111111111111111111 success",
+  "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+  "Program ComputeBudget111111111111111111111111111111 success",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]",
+  "Program log: Instruction: ClaimCashback",
+  "Program log: No cashback to claim",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P consumed 7088 of 79700 compute units",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P success",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]",
+  "Program log: Instruction: CloseUserVolumeAccumulator",
+  "Program data: kp+9rJJYOPQNC1epfO9vEi3l3E/iTyYfW1v5Vw5757oUUgnxuvTOZKui9WoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [2]",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P consumed 2170 of 64762 compute units",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P success",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P consumed 10398 of 72612 compute units",
+  "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P success"
+ ]
+}
