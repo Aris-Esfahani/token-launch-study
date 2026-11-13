@@ -87,10 +87,10 @@ def test_duration_and_when():
         "0 s", "45 s", "9 m 05 s", "3 h 07 m", "1 d 01 h",
     ]  # fmt: skip
     now = datetime.now()
-    assert _when(now.timestamp()) == f"{now:%H:%M} today"
+    assert _when(now.timestamp()).endswith((" AM today", " PM today"))
     assert _when((now - timedelta(days=1)).timestamp()).endswith("yesterday")
     assert _when((now + timedelta(days=1)).timestamp()).endswith("tomorrow")
-    assert _when(time.mktime((2026, 11, 3, 9, 5, 0, 0, 0, -1))) == "Nov 3 09:05"
+    assert _when(time.mktime((2026, 11, 3, 9, 5, 0, 0, 0, -1))) == "Nov 3 9:05 AM"
 
 
 def test_history_progress_toward_the_target(data, monkeypatch, tmp_path):

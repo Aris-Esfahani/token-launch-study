@@ -26,9 +26,13 @@ def redact(text: str, secrets: Iterable[str] = ()) -> str:
     return _KEY_PARAM.sub(rf"\1{MASK}", text)
 
 
+# Log times on a 12-hour clock in local time, e.g. "2026-11-12 09:05:27 PM".
+DATE_FORMAT = "%Y-%m-%d %I:%M:%S %p"
+
+
 class RedactingFormatter(logging.Formatter):
     def __init__(self, fmt: str, secrets: Iterable[str] = ()) -> None:
-        super().__init__(fmt)
+        super().__init__(fmt, datefmt=DATE_FORMAT)
         self._secrets = [s for s in secrets if s]
 
     def format(self, record: logging.LogRecord) -> str:

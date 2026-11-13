@@ -52,7 +52,7 @@ A few lines of `agentd status` tell you how the recording is going:
 ```
 feed 1:    solana-public, connected, last message 0.1s ago, 4.2s behind, first for 58%, 12 drops
 feed 2:    solana-public-legacy, connected, last message 0.0s ago, 3.9s behind, first for 42%, 9 drops
-saved:     21 h 40 m recorded out of 22 h 05 m since 06:10 today; 14 gaps, 25 m off
+saved:     21 h 40 m recorded out of 22 h 05 m since 6:10 AM today; 14 gaps, 25 m off
 uptime:    98.1% of the last 24 h recorded; meets the 95% target
 verdicts:  9,120 made (avoid 4,010, caution 5,090, pass 20); 31 with gaps; 410 tokens tracked; ...
 ```

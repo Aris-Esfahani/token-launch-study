@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from agent import clock
 from agent.config import load_config
 from agent.daemon import main as engine
 from agent.daemon.control import RunFiles, engine_state, process_started_at
@@ -198,7 +198,7 @@ def status() -> None:
 
     typer.echo(f"agentd:    {state} (pid {s['pid']})")
     run_time = _duration(time.time() - s["started_at"])
-    typer.echo(f"running:   {run_time}, since {_when(s['started_at'])}")
+    typer.echo(f"running:   {run_time}, since {_when(s['started_at'])} ({clock.zone()})")
     if state == "unresponsive":
         age = int(time.time() - s["updated_at"])
         typer.echo(f"           no heartbeat for {age}s; the numbers below are old")
@@ -409,17 +409,10 @@ def _duration(seconds: float) -> str:
 
 
 def _when(epoch: float) -> str:
-    """A moment in local time: '04:03 today', '23:10 yesterday' or 'Nov 10 04:03'."""
-    moment = datetime.fromtimestamp(epoch)
-    days_ago = (datetime.now().date() - moment.date()).days
-    if days_ago == 0:
-        return f"{moment:%H:%M} today"
-    if days_ago == 1:
-        return f"{moment:%H:%M} yesterday"
-    if days_ago == -1:
-        return f"{moment:%H:%M} tomorrow"
-    return f"{moment:%b} {moment.day} {moment:%H:%M}"
+    """A moment in local time: '4:03 AM today', '11:10 PM yesterday' or 'Nov 10 4:03 AM'."""
+    return clock.when(epoch)
 
 
 def _clock(epoch: float, *, with_date: bool = False) -> str:
-    return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S" if with_date else "%H:%M:%S")
+    """'9:05:27 PM', or 'Nov 12 9:05:27 PM' with the date."""
+    return clock.stamp(epoch) if with_date else clock.clock(epoch, seconds=True)

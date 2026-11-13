@@ -133,7 +133,8 @@ def test_the_alert_line_puts_the_mint_first():
     (verdict,) = live.due(T0 + 32, now=T0 + 47.0)
     line = alert_line({**verdict, "symbol": "STM"})
     clock, rest = line.split("  ", 1)
-    assert len(clock) == 8 and rest.startswith("M  $STM  T+30s  CAUTION, 17s late  2 snipers")
+    assert len(clock) == 11 and clock.endswith(("AM", "PM"))
+    assert rest.startswith("M  $STM  T+30s  CAUTION, 17s late  2 snipers")
 
 
 def test_rules_are_read_again_when_the_file_changes(tmp_path):

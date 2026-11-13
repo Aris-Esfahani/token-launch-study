@@ -18,10 +18,9 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
-from agent import __version__
+from agent import __version__, clock
 from agent.config import AppConfig, load_config
 from agent.daemon import live_state
 from agent.daemon.control import (
@@ -352,9 +351,9 @@ async def run(
         parsed = pipeline.handle(n, connection.name)
         if parsed is None or not foreground or show != "events":
             return
-        clock = datetime.fromtimestamp(n.recv_ts).strftime("%H:%M:%S")
+        at = f"{clock.clock(n.recv_ts, seconds=True):>11s}"
         for line in describe(parsed, creates_only=creates_only):
-            print(f"{clock}  {line}", flush=True)
+            print(f"{at}  {line}", flush=True)
 
     settings = cfg.settings.live
     streams = []

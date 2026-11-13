@@ -12,6 +12,7 @@ from typing import Annotated
 import httpx
 import typer
 
+from agent import clock
 from agent.audit import AuditResult, recorded_span, run_audit
 from agent.backfill_parity import ParityResult, rpc_check, run_parity
 from agent.config import load_config
@@ -85,7 +86,7 @@ def audit(
     saved.write_text(json.dumps(result.to_json(), indent=1), encoding="utf-8")
 
     typer.echo("")
-    typer.echo(f"Window (UTC):                {_utc(start)} to {_utc(end)}"
+    typer.echo(f"Window ({clock.zone()}):                {_local(start)} to {_local(end)}"
                f"  ({(end - start) / 3600:.2f} h)")  # fmt: skip
     typer.echo(f"Creates on chain:            {result.onchain_creates:,}")
     typer.echo(f"Recorded:                    {result.recorded_creates:,}")
@@ -112,8 +113,8 @@ def audit(
     raise typer.Exit(0 if passed else 1)
 
 
-def _utc(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%d %H:%M:%S")
+def _local(epoch: float) -> str:
+    return clock.stamp(epoch)
 
 
 @app.command("snapshot-config")
@@ -176,7 +177,8 @@ def verify_curve(
     saved = folder / f"verify-curve-{datetime.now(UTC):%Y%m%dT%H%M%S}.json"
     saved.write_text(json.dumps(result.to_json(), indent=1), encoding="utf-8")
 
-    typer.echo(f"Window (UTC): {_utc(start)} to {_utc(end)}  ({(end - start) / 3600:.2f} h)")
+    typer.echo(f"Window ({clock.zone()}): {_local(start)} to {_local(end)}  "
+               f"({(end - start) / 3600:.2f} h)")  # fmt: skip
     typer.echo("")
     typer.echo(f"{'Trade kind':28s}{'trades':>10s}{'exact':>10s}{'in tolerance':>14s}")
     rows = sorted(result.buckets.items(), key=lambda kv: -kv[1].trades)
@@ -304,7 +306,7 @@ def backfill(
         if not wait:
             typer.echo(f"Epoch {epoch}: {problem}. Try later, or add --wait.")
             raise typer.Exit(1)
-        typer.echo(f"{datetime.now():%H:%M} epoch {epoch}: {problem}; checking again in "
+        typer.echo(f"{clock.clock(time.time())} epoch {epoch}: {problem}; checking again in "
                    "10 minutes (Ctrl+C to give up).")  # fmt: skip
         time.sleep(600)
     if status:
@@ -380,7 +382,8 @@ def parity(
         typer.echo(f"Nothing compared: {result.note}.")
         raise typer.Exit(1)
     if result.start_ts:
-        typer.echo(f"Overlap (UTC): {_utc(result.start_ts)} to {_utc(result.end_ts)}, "
+        typer.echo(f"Overlap ({clock.zone()}): {_local(result.start_ts)} to "
+                   f"{_local(result.end_ts)}, "
                    f"{len(result.windows)} slot range(s)")  # fmt: skip
     typer.echo("")
     typer.echo(f"{'Table':20s}{'in both':>11s}{'differ':>8s}{'only rec.':>11s}"
@@ -442,8 +445,8 @@ def signals(
         typer.echo(str(exc))
         raise typer.Exit(1) from None
     levels = (*LEVELS, PASS)
-    local = lambda ts: datetime.fromtimestamp(ts).strftime("%H:%M")  # noqa: E731
-    typer.echo(f"Tokens created {local(start)}-{local(end)} ({(end - start) / 3600:.1f} h): "
+    typer.echo(f"Tokens created {clock.when(start)} to {clock.when(end)} "
+               f"({(end - start) / 3600:.1f} h): "
                f"{len(replay.states):,}; judged at {at} s after creation: {len(clean):,} "
                f"({len(rows) - len(clean):,} more left out: a recording gap touched them)")
     if not clean:
@@ -478,7 +481,7 @@ def signals(
     for r in sorted(clean, key=lambda r: r["cutoff_ts"], reverse=True)[:show]:
         v = verdicts[r["mint"]]
         mcap = f"{r['market_cap_sol']:.0f} SOL" if r["market_cap_sol"] is not None else "-"
-        typer.echo(f"  {r['mint']}  {v.level:7s} {local(r['cutoff_ts'] - at)}  "
+        typer.echo(f"  {r['mint']}  {v.level:7s} {clock.clock(r['cutoff_ts'] - at):>8s}  "
                    f"buyers {r['unique_buyers']:>3}  top10 {r['top10_hold_pct']:>3.0f}%  "
                    f"dev {r['dev_hold_pct']:>3.0f}%  snipers {r['sniper_hold_pct']:>3.0f}%  "
                    f"mcap {mcap}")  # fmt: skip

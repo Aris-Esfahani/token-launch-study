@@ -24,6 +24,7 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent.clock import clock
 from agent.features.token_state import SNAPSHOT_OFFSETS_S, CreatorIndex, TokenState
 from agent.ingest.borsh_idl import Field
 from agent.ingest.gaps import overlap_seconds
@@ -244,13 +245,13 @@ class RulesFile:
 def alert_line(verdict: dict) -> str:
     """One line for the alerts log and the foreground view, mint first (to paste into
     Padre)."""
-    clock = time.strftime("%H:%M:%S", time.localtime(verdict["decided_at"]))
+    at = f"{clock(verdict['decided_at'], seconds=True):>11s}"  # aligned: "10:05:27 PM"
     symbol = f"${verdict['symbol']}" if verdict.get("symbol") else "$?"
     late = f", {verdict['wait_s']:.0f}s late" if verdict["wait_s"] >= 10 else ""
     gap = "  (data incomplete: recording gap)" if verdict["has_gap"] else ""
     reasons = "; ".join(verdict["reasons"]) if verdict["reasons"] else "no rule fired"
     return (
-        f"{clock}  {verdict['mint']}  {symbol}  T+{verdict['offset_s']}s  "
+        f"{at}  {verdict['mint']}  {symbol}  T+{verdict['offset_s']}s  "
         f"{verdict['level'].upper()}{late}  {reasons}{gap}"
     )
 
