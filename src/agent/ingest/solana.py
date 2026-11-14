@@ -36,6 +36,17 @@ def b58decode(text: str) -> bytes:
     return b"\0" * leading_ones + body
 
 
+def is_address(text: object) -> bool:
+    """A Solana address (wallet, mint or program): base58 text of exactly 32 bytes."""
+    if not isinstance(text, str) or not 32 <= len(text) <= 44:
+        return False
+    try:
+        raw = b58decode(text)
+    except ValueError:
+        return False
+    return len(raw) == 32 and b58encode(raw) == text
+
+
 @lru_cache(maxsize=200_000)
 def pubkey_text(raw: bytes) -> str:
     """A 32-byte address as base58 text. Cached: the same wallets and mints repeat a lot."""

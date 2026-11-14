@@ -6,10 +6,12 @@ from __future__ import annotations
 import time
 
 from agent.daemon.live_state import (
+    ALERT_SIGNALS,
     SETTLE_S,
     LiveSignals,
     RulesFile,
     alert_line,
+    alert_summary,
 )
 from agent.features.replay import load_states
 from agent.features.token_state import SNAPSHOT_OFFSETS_S, CreatorIndex
@@ -135,6 +137,52 @@ def test_the_alert_line_puts_the_mint_first():
     clock, rest = line.split("  ", 1)
     assert len(clock) == 11 and clock.endswith(("AM", "PM"))
     assert rest.startswith("M  $STM  T+30s  CAUTION, 17s late  2 snipers")
+
+
+def test_a_mint_is_analyzed_from_memory_up_to_the_settled_second():
+    live, rows = fed()
+    # The recording has covered the chain to T0+47.5: every event up to T0+45 is in.
+    a = live.analyze("M", covered_ts=T0 + 47.5, now=T0 + 50.0)
+    assert a["known"] and a["cutoff_ts"] == T0 + 45 and a["data_age_s"] == 5.0
+    assert a["snapshot"] == state_with(rows).snapshot(T0 + 45, creators=live.creators)
+    assert a["level"] == "avoid" and a["reasons"] == ["dev sold 50%", "2 snipers"]
+    assert a["verdicts"] == [] and a["has_gap"] is False
+    assert sum(live.stats.verdicts.values()) == 0  # a lookup is not a verdict
+    # Earlier verdicts are listed; a lookup never looks before the launch.
+    live.due(T0 + 32)
+    assert live.analyze("M", covered_ts=T0 + 32)["verdicts"] == [
+        {"offset_s": 30, "level": "caution"}
+    ]
+    assert live.analyze("M", covered_ts=T0 + 1)["cutoff_ts"] == T0
+    assert live.analyze("M", covered_ts=None)["cutoff_ts"] == T0
+
+
+def test_a_coins_bonding_curve_address_finds_the_coin():
+    live = signals(keep_s=400)
+    live.add("tokens", create_row(bonding_curve="CURVE"))
+    a = live.analyze("CURVE", covered_ts=T0 + 40)
+    assert a["known"] and a["mint"] == "M" and a["copied"] == "CURVE"
+    assert live.analyze("M", covered_ts=T0 + 40)["copied"] == "M"
+    live.due(T0 + 1_000)  # forgotten after the keep time, curve address too
+    assert live.analyze("CURVE", covered_ts=T0 + 1_000)["known"] is False
+
+
+def test_mints_the_engine_does_not_track_say_why():
+    live, rows = fed()
+    live.add("trades", {**rows[1], "mint": "OLD", "signature": "old"})
+    held = live.analyze("OLD", covered_ts=T0 + 50)
+    assert held == {"mint": "OLD", "known": False, "why": held["why"]}
+    assert "it is trading, but it launched more than 15 minutes ago" in held["why"]
+    assert "not in the live data" in live.analyze("NEVER", covered_ts=T0 + 50)["why"]
+
+
+def test_alert_summaries_carry_the_key_signals_without_the_snapshot():
+    live, _ = fed()
+    (verdict,) = live.due(T0 + 32, now=T0 + 40.0)
+    summary = alert_summary(verdict)
+    assert "snapshot" not in summary and summary["mint"] == "M"
+    assert set(summary["signals"]) == set(ALERT_SIGNALS)
+    assert summary["signals"]["unique_buyers"] == verdict["snapshot"]["unique_buyers"]
 
 
 def test_rules_are_read_again_when_the_file_changes(tmp_path):

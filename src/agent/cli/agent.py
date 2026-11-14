@@ -42,6 +42,28 @@ def _root() -> None:
 
 
 @app.command()
+def screen() -> None:
+    """Open the screen: live alerts, and the analysis of any mint you paste or copy.
+
+    Keep it beside Padre. It needs the engine running (`agentd start`); it holds no
+    data itself, so it can be closed and opened again at any time."""
+    cfg = load_config()
+    port = cfg.settings.local_api.port
+    if not port:
+        typer.echo("local_api.port is 0 in config/settings.yaml: the screen's connection is off.")
+        raise typer.Exit(1)
+    try:
+        from agent.tui.app import run_screen
+    except ModuleNotFoundError as exc:
+        if exc.name != "textual":
+            raise
+        typer.echo("The screen needs the Textual package. Install it with:\n"
+                   "  .venv\\Scripts\\pip install -e .")  # fmt: skip
+        raise typer.Exit(1) from None
+    run_screen(port, cfg.run_dir)
+
+
+@app.command()
 def audit(
     hours: Annotated[float, typer.Option(help="How far back to check.")] = 24.0,
     trades_sample: Annotated[

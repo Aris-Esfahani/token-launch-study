@@ -90,6 +90,12 @@ class RpcSettings(BaseModel):
     max_rps: float = 3.0
 
 
+class LocalApi(BaseModel):
+    # The engine's connection for the screen (spec 3). It listens on 127.0.0.1 only;
+    # 0 turns it off.
+    port: int = 8765
+
+
 class Settings(BaseModel):
     programs: dict[str, str]
     live: Live
@@ -98,6 +104,7 @@ class Settings(BaseModel):
     chain: Chain = Chain()
     backfill: BackfillSettings = BackfillSettings()
     rpc: RpcSettings = RpcSettings()
+    local_api: LocalApi = LocalApi()
 
 
 @dataclass(frozen=True)

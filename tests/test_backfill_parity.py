@@ -209,6 +209,38 @@ def test_rows_only_the_recorder_has_must_not_be_on_chain(tmp_path, status, passe
         assert result.unchecked == [_fake_signature(9)]
 
 
+def test_the_chain_check_asks_in_small_batches_and_asks_missing_ones_again():
+    from agent.backfill_parity import rpc_check
+
+    class FakeRpc:
+        def __init__(self):
+            self.batches: list[list[str]] = []
+            self.flaky = {"real-but-flaky"}  # on chain, reported missing the first time
+
+        async def call(self, method, params):
+            signatures, options = params
+            assert method == "getSignatureStatuses" and options["searchTransactionHistory"]
+            self.batches.append(signatures)
+            values = []
+            for s in signatures:
+                if s.startswith("gone") or s in self.flaky:
+                    self.flaky.discard(s)
+                    values.append(None)
+                else:
+                    values.append({"err": {"x": 1} if s.startswith("failed") else None})
+            return {"value": values}
+
+    rpc = FakeRpc()
+    wanted = [f"gone-{i}" for i in range(10)] + ["failed-1", "real-but-flaky"]
+    out = asyncio.run(rpc_check(rpc, controls=["control"], batch=4)(wanted))
+    assert all(len(b) <= 4 for b in rpc.batches)
+    assert out["real-but-flaky"] == "ok" and out["failed-1"] == "failed"
+    assert all(out[f"gone-{i}"] == "missing" for i in range(10))
+    # A control the node cannot find even when asked twice: nothing counts as checked.
+    rpc = FakeRpc()
+    assert asyncio.run(rpc_check(rpc, controls=["gone-control"], batch=4)(wanted)) == {}
+
+
 def test_nothing_to_compare(tmp_path):
     bf, index, _ = run_fixture_backfill(tmp_path)
     result = compare(tmp_path, bf.epoch, chunk_slots=bf.chunk_slots, first_slot=index.first_slot)

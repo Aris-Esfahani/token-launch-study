@@ -1,0 +1,43 @@
+# How the user would trade on Padre, for the paper ledger and backtests (spec 1, 10, 11).
+# The ledger pretends to buy every alert this way and records how each exit plan would
+# have done. Nothing here places a trade.
+#
+# From the user (2026-11-12): 1 SOL per buy (first 0.1, changed the same day). No fixed
+# take-profit or stop-loss yet, so the ledger runs several exit plans side by side to
+# compare them. Every number below except buy_sol is a starting guess to be compared,
+# not a recommendation.
+#
+# pump.fun's own fees come from the chain (spec 4), never from this file. Price impact
+# comes from the bonding-curve math on each coin's reserves at the moment of the trade.
+
+buy_sol: 1.0
+
+# Seconds from the alert to the buy landing on chain: reading the alert, copying the mint
+# into Padre, clicking buy, the network. Spec 10: default 5 s; also test 2 s and 10 s.
+entry_delay_s: 5
+entry_delay_tests_s: [2, 5, 10]
+
+# The most the price may move against a buy or sell before Padre refuses it. A simulated
+# order that would move it more is counted as failed, as it would be on Padre.
+slippage_pct: 20
+
+# Paid on every buy and sell. A guess until the user checks Padre's settings.
+priority_fee_sol: 0.0005
+
+# Padre's own fee per trade, as a % of the trade. Not set: check Padre's current fee
+# before trusting paper results (the ledger reports it as missing until then).
+platform_fee_pct: null
+
+# Exit plans compared side by side. take_profit_pct / stop_loss_pct: % move from the
+# entry price; time_stop_min: sell after this long whatever the price.
+exit_plans:
+  - name: double_or_half      # the spec's "2x before -50%" target
+    take_profit_pct: 100
+    stop_loss_pct: 50
+    time_stop_min: 30
+  - name: quick_50_25
+    take_profit_pct: 50
+    stop_loss_pct: 25
+    time_stop_min: 15
+  - name: hold_5_min
+    time_stop_min: 5

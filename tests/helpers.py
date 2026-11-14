@@ -60,8 +60,9 @@ async def acknowledge(ws, subscription: int = 7) -> dict:
 
 
 def make_project(root: Path, *, ws_url: str = "ws://127.0.0.1:1", env: str = "",
-                 extra_sources: str = "") -> Path:
-    """Create a minimal project folder (config/settings.yaml + .env) under `root`."""
+                 extra_sources: str = "", api_port: int = 0) -> Path:
+    """Create a minimal project folder (config/settings.yaml + .env) under `root`. The
+    engine's local API is off unless `api_port` is given (never the real engine's port)."""
     (root / "config").mkdir(parents=True, exist_ok=True)
     settings = textwrap.dedent(
         f"""\
@@ -78,7 +79,8 @@ def make_project(root: Path, *, ws_url: str = "ws://127.0.0.1:1", env: str = "",
     )
     (root / "config" / "settings.yaml").write_text(
         settings + textwrap.indent(textwrap.dedent(extra_sources), "    ")
-        + "  reconnect: {initial_s: 0.05, max_s: 0.2}\n  stale_after_s: 5\n",
+        + "  reconnect: {initial_s: 0.05, max_s: 0.2}\n  stale_after_s: 5\n"
+        + f"local_api: {{port: {api_port}}}\n",
         encoding="utf-8",
     )
     (root / ".env").write_text(env, encoding="utf-8")

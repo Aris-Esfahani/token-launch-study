@@ -4,12 +4,15 @@ Handoff doc for Claude Code. Read fully before writing code.
 
 **What this is:** a local terminal app that scores brand-new pump.fun tokens and gives instant analysis on any mint the user is looking at in **Padre** (trade.padre.gg / terminal.pump.fun). The human trades manually on Padre. **The agent never places trades and never touches private keys.**
 
+> **Research track** *(2026-11-13, decided by the user)*. The project is now a data science study, not a tool for trading. Its question: **using only a new pump.fun coin's first 30 s to 5 min of on-chain activity, how well can we predict whether it dies, rugs, graduates or doubles, and would any of that survive fees?** The data is the backfilled history (4.1); the deliverable is an honest, reproducible evaluation and write-up. What was built for live use (engine, live signals, screen, local API) stays as a working demo; the rest of the live side (paper trading, real-trade tracking, enrichers, packaging; parts of 1, 3, 11-14) is paused. Build order: 15.3. Evaluation plan: 15.4. Sections that describe the practical track are left as they were, so it can be resumed.
+
 ---
 
 ## 0. Locked decisions
 
 | Decision | Choice |
 |---|---|
+| Project track *(2026-11-13, research track)* | **Research:** a data science study on backfilled history (see the note above). The rows below still describe the practical track, which is paused. |
 | Trading venue | **Padre** (manual execution by the user). Padre has no public API. |
 | Chain / tokens | Solana, pump.fun bonding curve (and PumpSwap after graduation) |
 | Trading window | First **0-15 min** after token creation |
@@ -53,7 +56,15 @@ Padre-specific rules:
 
 ## 2. Goals and non-goals
 
-**Goals**
+**Goals: research track** *(2026-11-13, research track; these replace the practical goals below while the project is on this track)*
+- Build a complete, recent historical dataset from the backfill (4.1): every pump.fun coin and trade, bonding curve and PumpSwap.
+- Label every coin (section 7) and compute its features at T+30/60/120/300 s with the shared, no-lookahead feature code (6, 8).
+- Describe the market: how often coins die, rug, graduate and double; how that varies by hour, by creator history and for mayhem coins.
+- Predict the section 7 outcomes and measure honestly: time-split evaluation fixed in advance (15.4), against base rates, the hand-written rules and logistic regression; calibration; leakage checks.
+- Simulate whether any signal would make money after fees, price impact and entry delay (10), as analysis only.
+- Write it up so the results can be reproduced from the data and the commands, with their limits stated.
+
+**Goals: practical track** *(paused 2026-11-13, research track; kept for reference)*
 - Build a large, recent historical training set (backfill) before going live.
 - Record every new pump.fun token and bonding-curve trade in real time. *(Updated 2026-11-12, after Phase 1. PumpSwap trading is not recorded live: its stream is about 83 GB/day, four times the bonding-curve stream. PumpSwap history comes from the backfill; live PumpSwap for freshly graduated tokens can be added later with one small subscription per new pool.)*
 - Keep live, in-memory features for every token under 15 min old.
@@ -66,6 +77,7 @@ Padre-specific rules:
 - No auto-execution, no private keys, no Padre automation.
 - No reinforcement-learning market simulator.
 - No paid data.
+- *(2026-11-13, research track.)* No further live-tool work (always-on uptime, paper ledger, alerts, packaging) while on the research track; the live recorder's data is used only to describe the live feed, not for training.
 
 ---
 
@@ -173,10 +185,11 @@ Do **not** use for training: Coin-Meme / CoinVibe (graduated tokens only, surviv
 - Same parser and schema as the live recorder (section 5). Tag every row with `source = backfill | recorder | external`.
 - **Recency weighting:** pump.fun fees, curve parameters, migration target (Raydium → PumpSwap), and instruction formats have changed over time. Train on the most recent 2-3 months; if older data is added, down-weight it and include a "fee/curve regime" feature from the versioned config.
 - External datasets (MemeTrans, Kaggle) are for prototyping and validation, and stay out of the main training set unless their dates and mechanics match the current regime.
-- Run a **parity test**: for a period covered by both the backfill and the live recorder, the two must produce identical trades and features. *(Made precise 2026-11-12, Phase 3.)* The live feed drops some transactions and delivers a few that never landed, so the two never hold exactly the same set. The test is: (1) every row both captured (same `signature` + `event_index`) is identical in every shared column except `recv_ts` and `source`; (2) every row only the recorder has belongs to a transaction the chain has no record of; (3) rows only the backfill has are recorder misses, reported inside and outside the recorder's logged gaps but not a failure. PumpSwap rows are compared only for transactions that mention pump.fun (the live feed follows pump.fun only). Backfill rows are kept in `data/raw_backfill/` until Phase 4 decides how to merge them.
+- Run a **parity test**: for a period covered by both the backfill and the live recorder, the two must produce identical trades and features. *(Made precise 2026-11-12, Phase 3.)* The live feed drops some transactions and delivers a few that never landed, so the two never hold exactly the same set. The test is: (1) every row both captured (same `signature` + `event_index`) is identical in every shared column except `recv_ts` and `source`; (2) every row only the recorder has belongs to a transaction the chain has no record of; (3) rows only the backfill has are recorder misses, reported inside and outside the recorder's logged gaps but not a failure. PumpSwap rows are compared only for transactions that mention pump.fun (the live feed follows pump.fun only). Backfill rows are kept in `data/raw_backfill/` until Phase 4 decides how to merge them. *(Updated 2026-11-13, closing Phase 3; approved by the user.)* Two readings, from the pilot epoch 1084: (a) a row both captured whose slot differs counts as matching when the chain confirms the backfill's slot: the live feed reported the transaction from a block that was dropped, and it landed again a few slots later (29 trades, all 29 confirmed); (b) when checking every recorder-only transaction is too slow on the public RPC (about 1.3 s each with the full history), a random sample may stand in, reported with its 95% upper bound on how many could be on chain (1,000 of 28,468 checked, none on chain: at most 0.30%), with control transactions checked before and after. The pilot also found that the live feed delivers about 1.3% of pump.fun trades that never land, even at commitment `confirmed`; live signals include them, backfilled training data does not.
 - *(Added 2026-11-12)* **Window:** start with the most recent 2-4 weeks, then extend toward 2-3 months only if the pilot shows the bandwidth, time, and disk cost are acceptable. Ask the user before each extension (large download).
 - *(Added 2026-11-12)* **Regime changes inside the window:** pump.fun changed layouts on 2026-09-12 (holder-rewards fields), 2026-09-30 (PumpSwap negative virtual reserves), 2026-10-07 (v3 trades, fees kept on the curve, synthetic migration, pump coins as quote mints), and 2026-10-13 (depth-2 quote coins). The parser must decode every regime in the window, with a test transaction from each.
-- *(Added 2026-11-12)* **Backfill-only fields:** priority fee, Jito tip, and position within a slot exist only in full transactions, not in the live log stream. Store them as nullable, tag them backfill-only, and keep them out of model features unless the live path can supply the same values (otherwise training and live scoring would disagree).
+- *(Added 2026-11-12)* **Backfill-only fields:** priority fee, Jito tip, and position within a slot exist only in full transactions, not in the live log stream. Store them as nullable, tag them backfill-only, and keep them out of model features unless the live path can supply the same values (otherwise training and live scoring would disagree). *(Updated 2026-11-13, research track.)* With no live scoring, they may be used as features, still known by each cutoff, tagged backfill-only, with every model also reported without them (what a live tool could use).
+- *(Added 2026-11-13, research track)* **Training data is the backfill only.** Recorder rows are not merged into it: the live feed misses some transactions and delivers about 1.3% of trades that never land (above). The recorder's data is used to describe the live feed.
 
 ---
 
@@ -222,7 +235,9 @@ All thresholds live in `config/labels.yaml`.
 - `is_rug`: within 60 min of creation, creator + linked wallets sell ≥ 50% of their holdings **and** price falls ≥ 80% from peak.
 - `is_dead`: no trades after T+30 min (pump.fun-speed version of the MemeChain paper's "One-Day Meme Coin").
 - `is_bundled`: at T+60s, the bundle cluster (8.2) holds ≥ 20% of supply.
+  - *(Updated 2026-11-13, research track.)* **Stand-in first.** The bundle cluster needs to know who sent SOL to the early buyers, and the backfill keeps only pump.fun and PumpSwap transactions, so that is not in the data. Until it is (by widening the backfill to the early buyers' funding transfers, or by checking against MemeTrans, Phase 5), the label is `is_bundled_proxy`: at T+60s, the wallets other than the creator that bought in the first second (thresholds in `config/labels.yaml`) hold ≥ 20% of supply. The write-up names it a stand-in.
 - Target: `bad = is_rug OR is_dead OR is_bundled`. Option later: survival model (time-to-death).
+- *(Added 2026-11-13, research track.)* Label rates are reported separately for mayhem and ordinary coins (8.10). R1 checks whether the mayhem agent's own trades keep coins from counting as dead, and reports `is_dead` both with and without them.
 
 **Stage 2: graduation**
 - `graduates_1h`: completes the bonding curve within 60 min of creation.
@@ -459,7 +474,9 @@ Never commit `.env`, data, or anyone's keys.
 
 Priority order: **parser → recorder → historical backfill → train a strong baseline → paper trade → go live.** Live-recorded data supplements the baseline; it is not the starting point.
 
-### 15.0 Build order: fast path *(updated 2026-11-12, during Phase 3; approved by the user)*
+*(2026-11-13, research track.)* On the research track the build order is 15.3 and the evaluation plan 15.4; 15.0-15.2 describe the practical track, which is paused.
+
+### 15.0 Build order: fast path *(updated 2026-11-12, during Phase 3; approved by the user. Paused 2026-11-13, research track: see 15.3)*
 
 The phases below keep their numbers and "done when" checks, but are built in this order so rules-based alerts go live and are paper-tracked while the backfill and models are built. The rules filter is the baseline that section 9 requires anyway; a model replaces it only when it beats it. The readiness criteria (15.1) for real money are unchanged, and every step ends with tests, its "done when" results and the user's OK.
 
@@ -495,7 +512,7 @@ The phases below keep their numbers and "done when" checks, but are built in thi
 | **15. Packaging** | `pipx` install, setup wizard, model manifest, README | Fresh install works on a clean Windows PC (macOS optional) |
 | **16. Ongoing** | Weekly retrain (backfill + recorder data, recency-weighted), wallet-label growth, optional remote alerts | Drift monitored (feature distributions, hit rate, latency) |
 
-### 15.1 Readiness criteria (decide before seeing results; do not loosen later)
+### 15.1 Readiness criteria (decide before seeing results; do not loosen later) *(practical track; paused 2026-11-13, research track: see 15.4)*
 
 The agent is "ready for real money" only when **all** hold on out-of-time data (the most recent month that the model never trained on) **and** during paper trading:
 
@@ -524,12 +541,43 @@ Store these thresholds in `config/readiness.yaml`; `agent train` and the TUI `st
 
 *(Fast path, 2026-11-12.)* With the build order in 15.0, rules-based alerts and paper trading start in about week 2 instead of weeks 7-8, and continuous recording starts at step B. The rest of this table still gives the order of the model work.
 
+*(2026-11-13, research track.)* This table is for the practical track. On the research track the order is R0-R7 in 15.3, with no fixed dates.
+
+### 15.3 Build order: research track *(2026-11-13, research track; decided by the user)*
+
+This replaces the fast path (15.0). Every step still ends with the tests, its "done when" results, an update to `docs/PROGRESS.md` and the user's OK. The no-lookahead rule (6) and the parity test (4.1, passed in Phase 3) stay mandatory. Large downloads are asked for first.
+
+| Step | Builds | Done when |
+|---|---|---|
+| **R0** | Close the live side: Phase 1's 24 h audit; stop the engine; bring branch `step-b` into `main` (with the user's OK) | Audit result recorded against Phase 1's check; engine stopped; recorded data kept |
+| **R1** | Labels (section 7; the label half of Phase 8): `config/labels.yaml`; labels from backfilled bonding-curve and PumpSwap trades up to 60 min after creation | A test for each label on built examples; labels are computed apart from the features and never feed them; label rates per day, mayhem vs. ordinary, look plausible |
+| **R2** | Dataset (the feature half of Phase 8): one row per coin per cutoff (T+30/60/120/300 s), from the shared feature code replayed on the backfill, joined to the labels; saved as Parquet with a manifest (code version, rules version, epochs) | No-lookahead test passes on the builder; one row per coin and cutoff; rebuilding gives identical output |
+| **R3** | Exploration (notebook): outcome rates, survival over time, hour of day, mayhem vs. ordinary, creator history, feature distributions; the current rules scored as the first baseline | Notebook runs top to bottom from the dataset; findings in `docs/PROGRESS.md` |
+| **R4** | More history (a smaller Phase 4): 7 more days first, the most recent archived epochs (about 2.7 TB to download, about 12 h at the pilot's speed, about 37 GB kept), more only if R5 needs it; asked for first | Complete coverage, gaps logged; download, disk and time documented |
+| **R5** | Models (Phases 9-10): stages 1-3, each as rules → logistic regression → LightGBM (9), with the evaluation plan (15.4) | The 15.4 report, with the test days scored once; SHAP and leakage checks |
+| **R6** | Backtest as analysis (Phase 11): simulated 1 SOL entries with a 5 s delay (2 s and 10 s tested), exact curve math, recorded fees, the exit plans in `padre_presets.yaml` as test settings | After-cost P&L per signal with delay sensitivity, per day, mayhem vs. ordinary |
+| **R7** | Write-up: question, data, method, results, limits (including the live-feed findings of Phases 1 and 3) | Someone else could reproduce the results from the data and the commands |
+| *optional* | Phase 5 (MemeTrans as a check on the bundle stand-in), Phase 6 (creator and wallet history), 8.7 copycat names (chain-only), stage 4 ranking as analysis | Their "done when" checks in 15.0, where they apply |
+
+Paused on this track: steps B (24 h uptime), E (paper ledger), and Phases 7, 12-16, apart from what is already built.
+
+### 15.4 Evaluation plan: research track *(2026-11-13, research track; decide before seeing results; do not loosen later)*
+
+Written into `config/evaluation.yaml` before any model is scored on the test days.
+- **Time split, never random:** the most recent quarter of the days (at least 2 days) is the **test set**, scored once at the end; the day before it is the **validation set**, for tuning and calibration; the rest is for training, with walk-forward splits inside it. All days are whole UTC days.
+- **Baselines every model must be compared against:** the base rate (always predicting the most common outcome), the hand-written rules (`config/rules.yaml`) and logistic regression.
+- **Metrics:** stage 1: PR-AUC, and recall of bad coins when blocking at most 30% of fine ones (the practical track's 90% / 30% target, as a reference); stages 2-3: PR-AUC, precision of the top 5 and top 20 coins per hour, calibration (Brier score and a calibration curve).
+- **Uncertainty:** 95% intervals by resampling whole hours (coins in the same hour are not independent).
+- **Reported separately:** mayhem vs. ordinary coins; each test day; with and without backfill-only features (4.1).
+- **Every result is reported,** including models that lose to the baselines.
+
 ---
 
 ## 16. Known risks and pitfalls
 
 - **Lookahead leakage** is the #1 failure mode. Enforce cutoffs in code and tests.
 - **Survivorship bias:** keep every token, especially the dead ones.
+- *(Added 2026-11-13, research track.)* **Few days, one market:** a week or two of history is one market regime, and coins launched in the same hour move together. Report results per day, give intervals that resample whole hours (15.4), and do not claim more than the days support.
 - **Latency on free tier:** the agent will lag paid bots by seconds. Measure it; don't trust backtest fills blindly. *(Measured 2026-11-12, step B.)* The free public feed itself often delivers events 5-77 s after they happen (median about 6 s) and cuts the connection when far behind; two connections run late together, so a second one helps with drops, not with lateness. A verdict waits until the data up to its cutoff has arrived, so it comes late too; each verdict records how late (`wait_s`), and the paper ledger (step E) must enter at that time, not at the cutoff.
 - **PC must be on and awake** while recording (in bursts now, continuously from Phase 12); gaps in recording mean missing data and slow backfills. Log every gap. *(Updated 2026-11-12, after Phase 1.)*
 - **Stale history:** older pump.fun data reflects older fees, curves, and migration paths. Backfill recent months; down-weight older data.
@@ -609,3 +657,15 @@ Not used as training data: single Oct 2024 snapshot, aggregator-sourced (survivo
 **2026-11-12, step B (fast path)** (built in branch `step-b`; evidence in `docs/PROGRESS.md`, Step B). Marked in place with "step B".
 
 16. **Gaps with several connections (3.2):** a gap is on-chain time no connection delivered. **Feed lateness (16):** measured, and verdicts record how late they came; the paper ledger enters at the verdict time. **Second connection (15.0):** on the same public server; about 130 GB a day. No requirement or "done when" check changed.
+
+**2026-11-13, closing Phase 3** (approved by the user; evidence in `docs/PROGRESS.md`, Phase 3, "Pilot epoch 1084"). Marked in place with "closing Phase 3".
+
+17. **Parity test (4.1):** rows whose slot differs count as matching when the chain confirms the backfill's slot (fork re-lands), and the recorder-only chain check may use a random sample with a stated 95% bound when checking all is too slow on the public RPC.
+
+**2026-11-13, research track** (decided by the user: the project becomes a data science study rather than a tool to trade with). Marked in place with "research track".
+
+18. **Purpose and goals (intro, 0, 2):** the project answers a research question on backfilled history and ends in a reproducible evaluation and write-up. The live tools built so far stay as a demo; paper trading, real-trade tracking, enrichers and packaging are paused. The practical track's text is kept so it can be resumed.
+19. **Build order (15, 15.2, 15.3):** R0-R7 (close the live side, labels, dataset, exploration, 7 more days of history, models, backtest as analysis, write-up) replace the fast path. 15.0 and 15.1 keep their numbers and are marked paused.
+20. **Evaluation (15.4):** a plan fixed in advance replaces the readiness criteria: time split with the test days scored once, base rate / rules / logistic regression baselines, set metrics, intervals by resampling whole hours, results reported separately for mayhem coins, test days, and with and without backfill-only features.
+21. **Data (4.1, 16):** training uses the backfill only; recorder data describes the live feed. Backfill-only fields may be features, with every model also reported without them.
+22. **Bundled label (7):** reported as a gap. The bundle cluster needs the early buyers' funding transfers, which the backfill does not keep, so `is_bundled_proxy` (other wallets' first-second buys holding ≥ 20% of supply at T+60s) stands in and is named as such. `is_dead` is reported with and without the mayhem agent's trades.

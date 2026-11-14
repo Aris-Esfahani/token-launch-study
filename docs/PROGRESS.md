@@ -8,21 +8,36 @@ Spec: [SPEC.md](SPEC.md) (moved from the project root on 2026-11-12; edits are l
 |---|---|---|
 | Pre-work: section 18 verification | Done 2026-11-12 | Results below. |
 | 0. Setup | Done 2026-11-12 (user OK'd) | Results in "Phase 0" below. |
-| 1. Parser + recorder | **Built 2026-11-12; 24-hour run in progress** | Results in "Phase 1" below. Not complete until the 24-hour run passes the audit and the user OKs it. |
+| 1. Parser + recorder | Done 2026-11-13 (user OK'd) | 24-hour audit: 0.54% of coins missed outside logged gaps (target under 1%). Results in "Phase 1" below. |
 | 2. Curve math + tests | Done 2026-11-12 (user OK'd) | Built while Phase 1's 24-hour run continued (user's choice). Results in "Phase 2" below. Mayhem proposals decided 2026-11-12 (spec 8.10). |
-| 3. Backfill pilot | **Built 2026-11-12; download waiting for the archive** | Plan approved by the user. The user OK'd the ~417 GB download and runs it with `--wait`; epoch 1084 is expected in the archive ~22:00 local. Results in "Phase 3" below. |
+| 3. Backfill pilot | Done 2026-11-13 (user OK'd) | Epoch 1084: size, disk and parse time measured; parity passes. Every difference came from the live feed (29 fork re-lands, all confirmed by the chain; 1.3% of trades that never landed, 1,000 of 1,000 sampled), not the archive reader. Results in "Phase 3" below. |
 
-Build order since 2026-11-12: the fast path in spec 15.0 (user's decision). Steps: A close
-Phases 1 and 3, B engine always on, C live signals + rules verdict, D screen, E paper
-ledger; the full backfill (Phase 4) runs in the background after A.
+**Build order since 2026-11-13: the research track in spec 15.3** (user's decision: the
+project becomes a data science study, not a tool to trade with; spec change log 18-22).
+Training data is the backfill; the live tools built so far stay as a demo.
+
+| Research step | State | Notes |
+|---|---|---|
+| R0. Close the live side | Done 2026-11-13 (user OK'd) | The user stopped the engine at 10:11 AM PST, Nov 13. The audit met Phase 1's check (7:03 PM); Phase 1 closed with the user's OK. Branch `step-b` brought into `main` by fast-forward (user's OK); the main folder's older uncommitted copies of the step C files, all superseded by `step-b`, were set aside in a labeled git stash. |
+| R1. Labels | Not started | Starts on epoch 1084, already on disk (no download). `is_bundled_proxy` stands in for the bundle label (spec 7). |
+| R2. Dataset | Not started | One row per coin and cutoff, features plus labels. |
+| R3. Exploration | Not started | Needs Jupyter and plotting packages (free; the user installs them). |
+| R4. More history | Not started | 7 more days: about 2.7 TB to download, about 12 h, about 37 GB kept. Asked for first. |
+| R5. Models | Not started | Evaluation plan in spec 15.4, written to `config/evaluation.yaml` before any test-day scores. |
+| R6. Backtest (analysis) | Not started | |
+| R7. Write-up | Not started | |
+
+Build order from 2026-11-12 to 2026-11-13: the fast path in spec 15.0 (user's decision,
+now paused). Steps: A close Phases 1 and 3, B engine always on, C live signals + rules
+verdict, D screen, E paper ledger; the full backfill (Phase 4) runs in the background after A.
 
 | Fast-path step | State | Notes |
 |---|---|---|
-| A. Close Phases 1 and 3 | Waiting for data | Pilot download tonight; Phase 1 audit after the 24-hour run (~05:24 local, Nov 13). |
-| B. Engine always on | **Built 2026-11-12 in a separate copy (branch `step-b`)** | Two live connections, gap log for several connections, continuous recording, uptime in `agentd status`. Deployed at the agentd restart after the Phase 1 audit; done when a 24-hour run records ≥ 95%. Results in "Step B" below. |
-| C. Live signals + rules verdict | **Built 2026-11-12 (branch `step-b`); live check after deployment** | The engine judges every new token at T+30/60/120/300 s; `agent check-live` compares live with replay. Results in "Step C" below. |
-| D. Screen | Not started | |
-| E. Paper ledger | Not started | Needs the user's Padre settings (`padre_presets.yaml`). |
+| A. Close Phases 1 and 3 | Done 2026-11-13: both closed with the user's OK | See "Phase 1" and "Phase 3" below. |
+| B. Engine always on | **Built 2026-11-12 in a separate copy (branch `step-b`); paused 2026-11-13** | Two live connections, gap log for several connections, continuous recording, uptime in `agentd status`. The 24-hour uptime test is not needed on the research track. Results in "Step B" below. |
+| C. Live signals + rules verdict | **Built 2026-11-12 (branch `step-b`)** | The engine judges every new token at T+30/60/120/300 s; `agent check-live` compares live with replay. The same feature code builds the research dataset (R2). Results in "Step C" below. |
+| D. Screen | **Built 2026-11-12 (branch `step-b`); kept as a demo** | `agent screen`: alert feed, paste box, clipboard watcher, status bar; the engine answers over a local connection. Results in "Step D" below. |
+| E. Paper ledger | Paused 2026-11-13 (research track) | `padre_presets.yaml` is kept as settings for the R6 backtest. |
 
 ## Step B: engine always on (fast path, built 2026-11-12)
 
@@ -86,6 +101,54 @@ Findings (from the engine log and two short live tests, 2026-11-12):
 Deployment, after the Phase 1 audit: `agentd stop`, bring branch `step-b` into the main
 folder (after tonight's backfill has finished), `agentd start`, then `agent verify-curve`
 and, after a few hours, `agent check-live`.
+
+## Step D: the screen (fast path, built 2026-11-12)
+
+**Done when:** "Copy-to-verdict median < 2 s; mint first in every alert." **Met in tests
+and by timing on recorded tokens; the real measurement needs the engine running the new
+code** (after the Phase 1 audit). Textual 8.2.8 installed by the user on 2026-11-12.
+
+Built in the step-b copy, as spec 3 and 12 describe:
+- **Engine side** (`daemon/local_api.py`): a WebSocket on 127.0.0.1 only
+  (`local_api.port`, 8765) that refuses web pages (a browser always sends an Origin
+  header). It answers "analyze this mint" from memory, pushes every token that passes,
+  and serves the status. A lookup uses the same settled point a verdict waits for (2 s
+  behind how far the recording has covered the chain), so it never sees a partial second.
+  It only reads the engine's memory; if the port is taken, the engine records without it.
+- **Screen** (`agent screen`, `tui/`): Textual app with the alert feed (mint first), a
+  paste box, the analysis panel (verdict and reasons, main signals, earlier verdicts,
+  data age, warnings for gaps, mayhem and non-SOL coins) and a status bar (feeds, data
+  lag, last gap, median copy-to-verdict time). Commands: a mint, `mute`/`unmute`,
+  `clipboard` (F2), `start`, `help`, `quit`. It reconnects by itself when the engine
+  restarts and holds no data. Every copy-to-verdict time goes to `run/screen_latency.jsonl`.
+- **Clipboard watcher** (`tui/clipboard.py`): Windows API through ctypes, no extra
+  package. It checks Windows' clipboard change counter every 0.1 s, which does not lock
+  the clipboard, and reads the text only after a change, so it cannot get in the way of
+  copying in the browser. Only text that is exactly one address counts; anything else is
+  dropped unread past 64 characters, and never stored, logged or sent.
+- Names and symbols (chosen by whoever launched the coin) are cleaned before display:
+  no control characters, so a name cannot send terminal escape codes.
+
+| Check | Result |
+|---|---|
+| Tests | 290 pass (19 new), ruff clean. The app test opens the screen, gets the latest alert, analyzes a copied mint and a typed one, and refuses text that is not an address without showing it. Found on the way: a copied mint was put in the paste box, so the next typed mint was added to it; the box now stays empty |
+| Mint first in every alert | Pass (tests: alert feed lines, alerts log, analysis panel) |
+| Engine lookup time | 0.07 ms median, 1.8 ms at the 99th percentile, 7.5 ms worst, over 1,760 recorded tokens at 15 minutes old (up to 2,703 trades) |
+| Copy-to-verdict median < 2 s | Expected about 0.1 s (the clipboard check interval) plus a local round trip; the app test checks each under 2 s. Real measurement after deployment |
+| Local API | Tests: lookups, status, bad requests, alert feed (latest then new), web pages refused (403), listens on 127.0.0.1, follows engine restarts; a real engine run answers a lookup for a token it recorded |
+
+Changed after the user tried the screen (2026-11-12, against a stand-in that follows the
+recorder's files, since the running engine is still the old code):
+- Alert lines wrap (they were cut off in a narrow window) and can be clicked, or picked
+  with the arrow keys and Enter, to analyze that coin.
+- A coin's bonding-curve address finds the coin too (one copied from Padre was the curve,
+  not the mint); the panel shows the mint first and says what was copied.
+- Coins copied from GeckoTerminal were hours old and already graduated: outside what the
+  screen covers (first 15 minutes on the curve), which fits the user's plan to trade
+  fresh launches.
+
+Not in this step (spec 12, later): RPC lookup of coins the engine did not see launch,
+`watch`, `filter`, `ask` and `stats`, enrichment (RugCheck, website), scores from models.
 
 ## Step C: live signals + rules verdict (fast path, built 2026-11-12)
 
@@ -211,6 +274,76 @@ Findings:
 6. Epoch 1084 (overlaps the recording from 12:03 UTC Nov 12 to its end, ~00:06 UTC
    Nov 13) was not in the archive at 16:23 UTC. Expected about 6 hours after its end.
 
+### Pilot epoch 1084 (run 2026-11-12, times PST)
+
+Published about 8:20 PM; downloaded 8:43-10:52 PM (1.75 h, 65 MB/s on average).
+
+| Check | Result |
+|---|---|
+| Download size | 409.9 GB, all 6,750 chunks, 0 failed (`backfill/gaps/` empty) |
+| Disk use | 5.74 GB kept: 5.34 GB per day of chain, so 28 days is about 150 GB (D: has about 275 GB free) |
+| Parse time | 4.62 CPU hours, 25 MB/s per core; 4.3 CPU hours per day of chain |
+| Read | 168,176,917 transactions; 39,647,122 kept; 42,560,380 failed ones dropped; 0 unreadable, 0 undecodable events, 0 cut-off logs |
+| Rows | tokens 45,439; trades 4,388,491; amm_trades 20,700,870; amm_pools 3,690; curve_completes 961; migrations 961; post_complete_buys 274 |
+| Network per day of chain | 381 GB (settings said 310; updated) |
+
+Download speed: the speed limit is split evenly across the workers and each worker stops
+downloading while it decodes, so 6 workers at 80 MB/s gave about 52 MB/s; restarted with
+8 workers at 100 MB/s, about 60-65 MB/s. Bursts reached 107 MB/s, so the line is not the
+limit. Worth fixing before the 28-day backfill (a shared limit instead of a split one).
+
+**Parity** (`agent parity --epoch 1084`; overlap 4:03:52 AM to 4:06:57 PM Nov 12):
+
+| Table | In both | Differ | Only recorder | Only backfill: in gaps | outside gaps (share) |
+|---|---|---|---|---|---|
+| tokens | 22,457 | 0 | 4 | 3,524 | 158 (0.70%) |
+| trades | 2,142,090 | 29 | 28,451 | 354,093 | 14,029 (0.65%) |
+| amm_trades | 245,976 | 0 | 147 | 41,373 | 1,738 (0.70%) |
+| curve_completes, migrations, post_complete_buys, amm_pools | 1,577 | 0 | 0 | 196 | 8 |
+
+**Result as defined: NOT PASSED.** 29 trades differ, and the 28,468 transactions only the
+recorder has could not be checked against the chain (the RPC refused, HTTP 413). What
+was found:
+1. **The 29 differing trades are forks, not parser errors.** Same transaction, but the
+   recorder has it 2-3 slots earlier than the archive. The chain (`getTransaction`,
+   finalized) confirms the archive's slot for all 3 checked: the live feed delivered the
+   copy from a block that was later dropped, and the transaction landed again 2-3 slots
+   later (in some, against a different curve state, so the amounts differ too).
+2. **The 28,451 recorder-only trades (1.3% of what the recorder kept) never landed.**
+   They are in 6,809 slots that all have a block in the archive, and the backfill kept
+   other trades from 6,797 of those blocks. 30 of 30 sampled are not on chain, while 3 of
+   3 control transactions (in both) are. So the live feed delivers about 1.3% of trades
+   that never land, even at commitment `confirmed`; the archive reader is not missing them.
+3. The recorder has 10 repeated rows (same transaction and event twice).
+4. **The recorder's miss rate, measured against the archive outside logged gaps: 0.70% of
+   tokens, 0.65% of trades** (Phase 1 asks for under 1% of tokens).
+5. **The chain check was too heavy for the public RPC.** With the full history it takes
+   about 1.3 s per signature, so 256 per request (the method's maximum) ran out of time
+   and was refused. Fixed in the step-b copy: 8 per request, and every "missing" is asked
+   once more (the node once reported a real transaction missing). Checking all 28,468
+   would take about 10 hours.
+
+**Chain check on a sample** (the user chose a random sample of 1,000 over checking all
+28,468, which would take about 10 hours on the public RPC; run 11:22-11:48 PM,
+`audits/parity-e1084-chain-sample-20261112T234821.json`, seed 20261112):
+
+| Check | Result |
+|---|---|
+| 1,000 random recorder-only transactions | **1,000 not on chain** (each "missing" asked twice) |
+| What that allows for all 28,468 | at most 0.30% could be on chain (95% confidence) |
+| 10 control transactions in both | found before and after the run (the node's history answered properly) |
+| 29 trades whose slot differs | the chain agrees with the archive's slot for **all 29** |
+
+So everything both copies captured is identical except 29 trades the live feed reported
+from blocks that were dropped (the chain confirms the archive's copy), and the rows only
+the recorder has are transactions that never landed. **Parity test: PASS**, with the fork
+re-lands counted as matching and the sampled chain check as the test, both OK'd by the
+user on 2026-11-13 (spec 4.1 note and change log 17). The sample can be repeated with
+`tools/parity_chain_sample.py`.
+
+**Phase 3 done when: met.** Download size, disk use and parse time measured; parity
+passes. Closed with the user's OK on 2026-11-13.
+
 ## Phase 2: curve math + tests (2026-11-12)
 
 **Done when:** "Simulated prices match on-chain trade prices within tolerance." **Result: met.**
@@ -279,7 +412,32 @@ Proposed spec changes, decided by the user on 2026-11-12 (spec 8.10, 10, change 
 ## Phase 1: parser + recorder (2026-11-12)
 
 **Done when:** "24h run with < 1% missed tokens (spot-check against an explorer); gaps logged."
-**Result so far:** built and tested; a six-minute live run passed the audit. **The 24-hour run has not been done yet.**
+**Result: met. Phase 1 closed with the user's OK on 2026-11-13.** The 24-hour audit found
+0.54% of coins missed outside logged gaps, and every gap was logged. It checked against
+the chain itself (every launch), which covers the spec's explorer spot-check.
+
+**The 24-hour audit** (`agent audit --hours 24 --trades-sample 20`, run 2026-11-13 and
+finished 7:03 PM PST). Checked against the chain itself (every coin launch the chain
+lists), not an explorer. Window: the last 24 recorded hours, Nov 12 10:11:08 AM to Nov 13
+10:11:08 AM PST. The user stopped the engine at 10:11 AM, Nov 13. Details:
+`D:\memecoin-agent-data\audits\audit-20261114T030312.json`.
+
+| Check | Result |
+|---|---|
+| Coin launches on chain | 46,430 |
+| Recorded | 41,554, plus 5 that the live feed delivered but never landed on chain |
+| Missed outside logged gaps | **251 (0.54%; target under 1%)** |
+| Missed inside logged gaps | 4,625 |
+| Gaps in the window | 271, 1 h 56 m in total (8.0% of the 24 hours); every one logged |
+| Trades of 20 random coins | 1,046 on chain, 2 missed (0.19%); 28 recorded that never landed (the live-feed effect Phase 3 measured at 1.3% of all trades) |
+| Could not be checked | 0, after a recheck. The audit printed "NOT PASSED" only because the public server returned nothing for 2 transactions; asked again, both were coin launches inside logged gaps, so the counts above include them. |
+
+What it means: outside its gaps the recorder misses almost nothing, but the free public
+feed dropped out often enough that 10.5% of the day's coins were not recorded (89.5%
+covered). On the research track this does not affect the models, since training uses the
+complete backfill (spec 4.1). It is a finding for the write-up about the live feed.
+
+**Earlier result:** built and tested; a six-minute live run passed the audit.
 
 | Check | Result |
 |---|---|
@@ -422,9 +580,11 @@ Decided by the user on 2026-11-12:
 - Internet plan: **unlimited data, confirmed** from the user's Xfinity usage page on 2026-11-12 ("Your plan comes with unlimited data"; 381 GB used so far in November). The recorder (22-54 GB per day) can run nonstop. The backfill is limited by time and by being far above normal home use, not by a monthly cap.
 
 Still open:
-1. The audit of the 24-hour run (Phase 1 "done when"), then the user's OK. Then stop the recorder (bursts).
-   On the next start the engine runs the Phase 2 code (mayhem resets, chain snapshots);
-   re-run `agent verify-curve` after that start to re-check mayhem-coin continuity.
+1. ~~The audit of the 24-hour run (Phase 1 "done when").~~ Done 2026-11-13: met (0.54%
+   missed outside gaps); the engine was stopped at 10:11 AM PST. Phase 1 closed with the
+   user's OK.
+   (Research track: the engine is not restarted, so the planned `agent verify-curve`
+   re-check after a restart is not needed.)
 1b. ~~A decision on the two proposed spec changes under Phase 2 (mayhem coins).~~ Decided 2026-11-12: own category, agent trades kept (spec 8.10).
 2. Later option: live PumpSwap for freshly graduated tokens via one small subscription per new pool.
 3. Padre presets (needed before Phase 11).

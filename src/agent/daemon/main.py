@@ -30,6 +30,8 @@ from agent.daemon.control import (
     process_started_at,
     write_status,
 )
+from agent.daemon.local_api import HOST as API_HOST
+from agent.daemon.local_api import LocalApi
 from agent.features.token_state import CreatorIndex
 from agent.ingest import downloads
 from agent.ingest.parsers import ParsedTx
@@ -331,6 +333,16 @@ async def run(
     )
     alerts = open(files.run_dir / "alerts.log", "a", encoding="utf-8", buffering=1)  # noqa: SIM115
 
+    # The screen's connection (spec 3): lookups from memory, the alert feed, the status.
+    latest_status: dict = {}
+
+    def analyze(mint: str) -> dict:
+        if live is None:
+            return {"mint": mint, "known": False, "why": f"live verdicts are off: {rules.error}"}
+        return live.analyze(mint, pipeline.gaps.last_ts)
+
+    api = LocalApi(analyze, lambda: latest_status)
+
     feed = Feed()
     stop = asyncio.Event()
     proc_started = process_started_at(os.getpid())
@@ -381,6 +393,7 @@ async def run(
             line = live_state.alert_line(verdict)
             if verdict["level"] == live_state.PASS:
                 alerts.write(line + "\n")
+                api.publish(live_state.alert_summary(verdict))
             if foreground and (show == "verdicts" or (
                 show == "alerts" and verdict["level"] == live_state.PASS
             )):  # fmt: skip
@@ -405,6 +418,13 @@ async def run(
         for stream, connection in zip(streams, feed.connections.values(), strict=True)
     ]
     snapshot_task = asyncio.create_task(_snapshot_loop(cfg, stop, secrets))
+    api_port = cfg.settings.local_api.port
+    if api_port:
+        try:
+            await api.start(api_port)
+            log.info("local API for the screen on %s:%s", API_HOST, api.port)
+        except OSError as exc:  # e.g. the port is taken; recording goes on without it
+            log.warning("local API off: cannot listen on port %s (%s)", api_port, exc)
     try:
         last_beat = 0.0
         last_rules_check = time.monotonic()
@@ -431,9 +451,11 @@ async def run(
             if now - last_beat >= HEARTBEAT_S:
                 last_beat = now
                 rates = _rates(feed, pipeline)
-                write_status(files, _status(
+                latest_status = _status(
                     "running", feed, pipeline, rates, proc_started, cfg, _live_status(live, rules)
-                ))  # fmt: skip
+                )
+                latest_status["local_api"] = api.stats()
+                write_status(files, latest_status)
             if now - last_summary >= SUMMARY_EVERY_S and rates:
                 last_summary = now
                 written = pipeline.sink.rows_written
@@ -466,6 +488,10 @@ async def run(
                 log.exception("live feed task crashed")
                 exit_code = 1
         snapshot_task.cancel()
+        try:
+            await api.close()
+        except Exception:  # noqa: BLE001 - never let the screen's connection block shutdown
+            log.exception("local API did not close cleanly")
         write_verdicts()
         alerts.close()
         try:

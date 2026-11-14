@@ -309,25 +309,39 @@ async def run_parity(data_dir: Path, epoch: int, *, chunk_slots: int, first_slot
     return result
 
 
-def rpc_check(rpc, controls: list[str] | None = None) -> ChainCheck:
+# Signatures per getSignatureStatuses request. With the full history the public node
+# takes about 1.3 s per signature (measured 2026-11-12), so 256 at a time (the method's
+# maximum) ran past the time limit and was refused with HTTP 413; 8 take about 10 s.
+CHECK_BATCH = 8
+
+
+def rpc_check(rpc, controls: list[str] | None = None, *, batch: int = CHECK_BATCH) -> ChainCheck:
     """A ChainCheck using getSignatureStatuses (with the full history). `controls` are
     signatures known to be on chain: if the node reports any of them missing, its history
-    is not reliable and nothing is reported as checked."""
+    is not reliable and nothing is reported as checked. The public node sometimes reports
+    a transaction that is on chain as missing, so every "missing" is asked once more."""
 
-    async def check(signatures: list[str]) -> dict[str, str]:
+    async def statuses(signatures: list[str]) -> dict[str, str]:
         out: dict[str, str] = {}
-        wanted = list(signatures) + list(controls or [])
-        for i in range(0, len(wanted), 256):
-            batch = wanted[i : i + 256]
+        for i in range(0, len(signatures), batch):
+            part = signatures[i : i + batch]
             reply = await rpc.call("getSignatureStatuses",
-                                   [batch, {"searchTransactionHistory": True}])  # fmt: skip
-            for signature, status in zip(batch, (reply or {}).get("value", []), strict=False):
+                                   [part, {"searchTransactionHistory": True}])  # fmt: skip
+            for signature, status in zip(part, (reply or {}).get("value", []), strict=False):
                 if status is None:
                     out[signature] = "missing"
                 elif status.get("err") is not None:
                     out[signature] = "failed"
                 else:
                     out[signature] = "ok"
+        return out
+
+    async def check(signatures: list[str]) -> dict[str, str]:
+        wanted = list(dict.fromkeys([*signatures, *(controls or [])]))
+        out = await statuses(wanted)
+        again = [s for s in wanted if out.get(s) == "missing"]
+        if again:
+            out.update(await statuses(again))
         if any(out.get(c) != "ok" for c in controls or []):
             return {}
         return {s: out[s] for s in signatures if s in out}

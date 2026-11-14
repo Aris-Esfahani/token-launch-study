@@ -1,8 +1,10 @@
 # Memecoin signal agent
 
-A local tool that watches new pump.fun tokens and (in later phases) scores them, so you can
-decide what to do on Padre yourself. Design: [docs/SPEC.md](docs/SPEC.md). Progress:
-[docs/PROGRESS.md](docs/PROGRESS.md).
+A data science study of brand-new pump.fun coins: using only a coin's first 30 seconds to
+5 minutes of on-chain activity, how well can we predict whether it dies, rugs, graduates
+or doubles, and would any of that survive fees? It started as a local tool to score coins
+for trading on Padre; that live tool still works as a demo. Design:
+[docs/SPEC.md](docs/SPEC.md). Progress: [docs/PROGRESS.md](docs/PROGRESS.md).
 
 **Not financial advice.** This is a high-risk market. The agent only analyzes and alerts.
 
@@ -125,6 +127,36 @@ the live signals match a replay of the recorded data (they must be identical):
 The rules are starting guesses, not advice: tokens that pass are not yet known to do
 better than any others.
 
+## The screen
+
+```powershell
+.venv\Scripts\agent screen
+```
+
+The window to keep beside Padre while you trade. It needs the engine running.
+
+- **Alerts** (top): every token that passes the rules, as it happens, mint first. Click
+  one (or pick it with the arrow keys and press Enter) to analyze it.
+- **Analyze** (middle): copy a coin's mint in Padre and its analysis appears by itself
+  (the clipboard watcher), or paste a mint into the box and press Enter. A coin's
+  bonding-curve address works too; the panel then shows its mint first. You get the
+  verdict with its reasons, the main signals (buyers, holders, top 10, dev, snipers,
+  buy/sell flow), its verdicts so far, and how old the data is.
+- **Status** (bottom): feeds, how far behind the data is, the last gap, and how long
+  copy-to-verdict takes (the median).
+
+Commands in the box: a mint, `mute <mint>` / `unmute <mint>`, `clipboard` (or F2) to
+turn the watcher on and off, `start` to start the engine, `help`, `quit`. Closing the
+screen does not stop the engine.
+
+The clipboard watcher only reacts to text that is exactly one Solana address. Anything
+else on the clipboard is ignored and never stored, logged or sent anywhere, and long
+text is not even read. Only coins launched while the engine runs, and in the last 15
+minutes, can be analyzed.
+
+The screen talks to the engine over a local connection (`local_api.port` in
+`config/settings.yaml`, 8765). It listens on this PC only and refuses web pages.
+
 ## Signals and rules (first version)
 
 ```powershell
@@ -177,7 +209,8 @@ gaps/gap-*.parquet                           every period when recording was off
 backfill/epoch-<E>/                          archive index, progress and report per epoch
 backfill/gaps/epoch-<E>.parquet              archive pieces that could not be read
 audits/audit-*.json                          audit results
-run/                                         engine log, status, alerts and state files
+run/                                         engine log, status, alerts, state files and
+                                             the screen's copy-to-verdict times
 ```
 
 Tables: `tokens` (creates), `trades` (bonding-curve buys and sells), `curve_completes`,
@@ -199,5 +232,10 @@ Phases 0-2: the engine records live pump.fun events to Parquet with a gap log, `
 audit` measures what was missed, and the curve math reproduces every recorded trade.
 Phase 3: `agent backfill` reads history from the archive and `agent parity` checks it
 against the recording. Fast path steps B and C: two live connections, continuous
-recording, and live rule verdicts for every new token. Models come later; see
+recording, and live rule verdicts for every new token. Step D: the screen (`agent
+screen`).
+
+Since 2026-11-13 the project is on the research track (spec 15.3): labels, a dataset built
+from the backfilled history, exploration, models with an evaluation plan fixed in advance
+(spec 15.4), a backtest as analysis, and a write-up. See
 [docs/PROGRESS.md](docs/PROGRESS.md).

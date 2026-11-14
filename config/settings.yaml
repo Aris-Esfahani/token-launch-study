@@ -73,9 +73,9 @@ dataset:
   # from the backfill (Phases 3-4); live recording adds the rest.
   target_days: 28
   # Download needed per day of history from the backfill archive (the whole blockchain
-  # is downloaded and only pump.fun is kept). Estimated from the archive's file sizes
-  # on 2026-11-12 (290-390 GB per ~1.07 days); the Phase 3 pilot measures it.
-  backfill_gb_per_day: 310
+  # is downloaded and only pump.fun is kept). Measured on the Phase 3 pilot, epoch 1084
+  # (2026-11-12): 409.9 GB for 25.81 h of chain.
+  backfill_gb_per_day: 381
 
 # History from Old Faithful (`agent backfill`, spec 4.1). The archive has no filter, so
 # a whole epoch (about 1.07 days, ~400 GB) is downloaded and only pump.fun is kept.
@@ -96,6 +96,11 @@ backfill:
 rpc:
   url: https://api.mainnet.solana.com
   max_rps: 3
+
+# The engine's connection for the screen (`agent screen`). It listens on 127.0.0.1 only,
+# so nothing outside this PC can reach it, and it refuses web pages. 0 turns it off.
+local_api:
+  port: 8765
 
 chain:
   # How often the engine saves pump.fun's curve parameters and fee schedule from chain

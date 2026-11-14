@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import math
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -38,6 +39,11 @@ SETTLE_S = 2
 KEEP_S = 15 * 60  # spec 12.5: rolling state for tokens under 15 minutes old
 HOLD_S = 180  # trades of a token not seen yet wait this long (on chain) for its create
 TABLES = ("tokens", "trades", "curve_completes")  # the recorded tables the signals read
+# Signals sent with each alert, so the screen can show them without asking again.
+ALERT_SIGNALS = (
+    "market_cap_sol", "curve_progress_pct", "unique_buyers", "holders", "top10_hold_pct",
+    "dev_hold_pct", "sniper_hold_pct", "net_sol_last_30s",
+)  # fmt: skip
 
 VERDICT_TABLE = "verdicts"
 VERDICT_COLUMNS = [
@@ -66,6 +72,8 @@ class _Tracked:
     state: TokenState
     symbol: str | None
     name: str | None
+    history: list[dict] = field(default_factory=list)  # this token's verdicts so far
+    curve: str | None = None  # its bonding-curve account
 
 
 @dataclass
@@ -101,6 +109,8 @@ class LiveSignals:
         self._settle_s = settle_s
         self._agent = agent
         self._tokens: dict[str, _Tracked] = {}
+        # Bonding-curve account -> mint: Padre shows both, and either may get copied.
+        self._curves: dict[str, str] = {}
         # Rows of tokens not tracked (yet), by mint, and the order they arrived in.
         self._held: dict[str, deque[tuple[str, dict]]] = {}
         self._held_order: deque[tuple[int, str]] = deque()
@@ -115,7 +125,12 @@ class LiveSignals:
             if mint in self._tokens:
                 return
             state = TokenState(row, agent=self._agent)
-            tracked = self._tokens[mint] = _Tracked(state, row.get("symbol"), row.get("name"))
+            curve = row.get("bonding_curve")
+            tracked = self._tokens[mint] = _Tracked(
+                state, row.get("symbol"), row.get("name"), curve=curve
+            )
+            if curve:
+                self._curves[curve] = mint
             self.creators.add(row["creator"], row["ts"], mint)
             for offset in self._offsets:
                 self._order += 1
@@ -181,6 +196,7 @@ class LiveSignals:
             "rules_sha": self.rules_sha,
             "snapshot": snapshot,
         }
+        tracked.history.append({"offset_s": offset, "level": level})
         self.stats.verdicts[level] += 1
         self.stats.verdicts_with_gap += has_gap
         self.stats.recent_waits.append((now, row["wait_s"]))
@@ -191,7 +207,7 @@ class LiveSignals:
     def _forget(self, covered_ts: float) -> None:
         old = [m for m, t in self._tokens.items() if t.state.created_ts + self._keep_s < covered_ts]
         for mint in old:
-            del self._tokens[mint]
+            self._curves.pop(self._tokens.pop(mint).curve or "", None)
         self.stats.tokens_tracked = len(self._tokens)
         # Held rows leave in the order they arrived (each mint's queue is in that order too).
         while self._held_order and self._held_order[0][0] + HOLD_S < covered_ts:
@@ -210,6 +226,52 @@ class LiveSignals:
         now = time.time() if now is None else now
         waits = sorted(w for at, w in self.stats.recent_waits if now - at <= within_s)
         return waits[len(waits) // 2] if waits else None
+
+    def analyze(self, mint: str, covered_ts: float | None, now: float | None = None) -> dict:
+        """What the engine knows about `mint` right now (spec 12.2, the fast reply), from
+        memory only: its signals up to the last second the recording has fully covered,
+        and the rules' verdict on them. Not counted as a verdict and not saved."""
+        now = time.time() if now is None else now
+        copied = mint
+        mint = self._curves.get(mint, mint)  # a bonding-curve address finds its coin
+        tracked = self._tokens.get(mint)
+        if tracked is None:
+            if mint in self._held:
+                why = ("it is trading, but it launched more than 15 minutes ago (only coins "
+                       "in their first 15 minutes are followed live), before the engine "
+                       "started, or during a gap")  # fmt: skip
+            else:
+                why = ("not in the live data: launched more than 15 minutes ago or before "
+                       "the engine started, missed in a gap, or not a pump.fun coin")  # fmt: skip
+            return {"mint": mint, "known": False, "why": why}
+        state = tracked.state
+        # The same settled point a verdict waits for: every event up to here has arrived.
+        if covered_ts is None:
+            cutoff = state.created_ts
+        else:
+            cutoff = max(math.floor(covered_ts) - self._settle_s, state.created_ts)
+        snapshot = state.snapshot(cutoff, creators=self.creators)
+        try:
+            verdict = judge(snapshot, self.rules)
+            level, reasons = verdict.level, verdict.reasons
+        except RulesError as exc:
+            level, reasons = "error", [str(exc)]
+        return {
+            "mint": mint,
+            "known": True,
+            "copied": copied,  # what was asked about: the mint, or the coin's bonding curve
+            "symbol": tracked.symbol,
+            "name": tracked.name,
+            "created_ts": state.created_ts,
+            "cutoff_ts": cutoff,
+            "data_age_s": round(now - cutoff, 1),
+            "level": level,
+            "reasons": reasons,
+            "has_gap": overlap_seconds(self._gaps, state.created_ts, cutoff) > 0,
+            "verdicts": list(tracked.history),
+            "rules_sha": self.rules_sha,
+            "snapshot": snapshot,
+        }
 
 
 class RulesFile:
@@ -240,6 +302,15 @@ class RulesFile:
             return False
         self.rules, self.sha, self.error = rules, rules_fingerprint(self.path), None
         return True
+
+
+def alert_summary(verdict: dict) -> dict:
+    """A verdict without its full snapshot: what the screen's alert feed shows."""
+    keep = ("ts", "mint", "symbol", "name", "created_ts", "offset_s", "level", "reasons",
+            "has_gap", "decided_at", "wait_s")  # fmt: skip
+    summary = {k: verdict[k] for k in keep}
+    summary["signals"] = {k: verdict["snapshot"].get(k) for k in ALERT_SIGNALS}
+    return summary
 
 
 def alert_line(verdict: dict) -> str:
