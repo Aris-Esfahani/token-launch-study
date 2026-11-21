@@ -20,16 +20,34 @@ entry_delay_tests_s: [2, 5, 10]
 # The most the price may move against a buy or sell before Padre refuses it. A simulated
 # order that would move it more is counted as failed, as it would be on Padre.
 slippage_pct: 20
+# How old the price Padre quoted is when the order lands (the click and the network): the
+# slippage limit is measured against the price this many seconds earlier. A guess.
+quote_age_s: 2
 
-# Paid on every buy and sell. A guess until the user checks Padre's settings.
+# Paid on every buy and sell, and on a failed one too. A guess until the user checks
+# Padre's settings. Solana's base fee comes on top; it is read from the chain data.
 priority_fee_sol: 0.0005
 
-# Padre's own fee per trade, as a % of the trade. Not set: check Padre's current fee
-# before trusting paper results (the ledger reports it as missing until then).
-platform_fee_pct: null
+# Padre's own fee per trade, as a % of the SOL bought and of the SOL sold. Padre's real
+# fee has not been checked: 1% is the user's cautious choice for the backtest's headline
+# (2026-11-21), a test setting, not a measured cost. Each what-if value below is shown
+# beside it. This setting changes no simulated trade, only what is taken off its result.
+platform_fee_pct: 1.0
+platform_fee_tests_pct: [0.0]
+
+# Share of orders that fail for reasons the data cannot show (network, congestion). The
+# backfill holds no failed transactions, so this is a guess (user's choice, 2026-11-21):
+# 5%, also tested at 0% and 10%. A failed buy is not retried; a failed sell is tried
+# again one entry delay later. After max_sell_attempts failed sells (by chance or on the
+# slippage limit) the next one is sent without a slippage limit.
+failed_tx_rate: 0.05
+failed_tx_rate_tests: [0.0, 0.05, 0.10]
+max_sell_attempts: 4
 
 # Exit plans compared side by side. take_profit_pct / stop_loss_pct: % move from the
-# entry price; time_stop_min: sell after this long whatever the price.
+# entry price; time_stop_min: sell after this long whatever the price. A sell lands one
+# entry delay after the price that triggered it (user's choice, 2026-11-21: trading by
+# hand, a sell is as slow as a buy); a time stop sells at its planned time.
 exit_plans:
   - name: double_or_half      # the spec's "2x before -50%" target
     take_profit_pct: 100

@@ -261,6 +261,35 @@ It reads the dataset (`agent dataset`) and leaves out the days the evaluation pl
 (`config/evaluation.yaml`, spec 15.4) holds back for testing models. Findings, with
 numbers, are in `docs/PROGRESS.md`.
 
+## Backtest as analysis (research track)
+
+What a 1 SOL buy after each signal would have made or lost after costs. Nothing is
+traded: it replays recorded trades.
+
+```powershell
+.venv\Scripts\agent backtest validation   # chooses the score cuts on the validation day and freezes them
+.venv\Scripts\agent backtest train        # the unfitted signals (every coin, the rules) on the training days
+.venv\Scripts\agent backtest test         # the test days, once; refused a second time
+```
+
+- **Signals** (`config/backtest.yaml`): every coin, the rules, and the saved models
+  (`agent train`) with score cuts chosen on the validation day by picks per hour, never by
+  profit.
+- **A trade** (`config/padre_presets.yaml`): 1 SOL bought 5 s after the decision time
+  (also 2 s and 10 s), exact bonding-curve or PumpSwap pool math on the reserves at that
+  second, fees read from the chain data, a 20% slippage limit, a priority fee, a share
+  of orders that fail, and three exit plans (take-profit, stop-loss, time stop).
+- **Results:** `docs/R6_RESULTS.md`: profit or loss per signal for each delay, day and
+  exit plan, for ordinary and mayhem coins, with 95% intervals. They are shown under two
+  views of our own buy: it leaves no trace in the market (strict, the headline), or its
+  SOL stays in the reserves (generous). The truth is between the two.
+- `test` refuses to run when the settings, the cuts, the code or the models changed
+  after the cuts were frozen.
+- Padre's own fee (`platform_fee_pct`, 1% as a cautious test setting; the real fee has
+  not been checked) changes no simulated trade, only what is taken off each result. After
+  changing it, `agent backtest <days> --resummarize` builds the report again from the
+  saved trades without simulating anything, and keeps the report it replaces.
+
 ## Where the data goes
 
 Everything is under `DATA_DIR` from `.env` (default: `./data`):
@@ -276,6 +305,9 @@ audits/audit-*.json                          audit results
 labels/coins.parquet, entries.parquet        labels (`agent labels`), with manifest.json
 dataset/dataset.parquet                      the research dataset (`agent dataset`), with
                                              manifest.json
+backtest/r6/                                 the backtest (`agent backtest`): cuts.json,
+                                             frozen.json, a report per set of days, and
+                                             ledger/<set>/*.parquet (every simulated trade)
 notebooks/                                   notebooks run with their results, and pages
 duckdb_tmp/                                  DuckDB's overflow files, kept off drive C:
 run/                                         engine log, status, alerts, state files and

@@ -258,6 +258,7 @@ All thresholds live in `config/labels.yaml`.
 5. **The Stage 3 entry price includes the position's price impact but not fees.** On the curve the buy is simulated with the curve math. For a coin that graduated before the entry, the entry is the last traded price, without a simulated impact (the pool's reserves include a virtual part). Fees are applied in the backtest (10).
 6. **`is_rug` uses the creator's wallet only.** Finding linked wallets needs the same funding transfers as the bundle cluster, which the backfill does not keep.
 - Labels come from the backfill only. A coin whose first 65 minutes (the last entry at T+305 s plus one hour) are not fully covered keeps a row with empty labels.
+- *(Added 2026-11-21, closing R6.)* The note in `labels/make_labels.py` that mayhem coins' entry prices are "less exact" because their curves are reset between trades is out of date: in the backfill the reserves after the last recorded trade are exact for them too (8.10). The labels and the module are unchanged (its file's hash is recorded with the dataset); only this reading of them is corrected.
 
 ---
 
@@ -346,6 +347,7 @@ About a fifth of new coins are in pump.fun's mayhem mode: pump.fun's own agent w
 - **Their own category:** `is_mayhem` (from the create event) is a feature, and label rates and model metrics are reported separately for mayhem and ordinary coins. If the two behave very differently, train a separate model for mayhem coins.
 - **The agent's trades stay in** the data, the features and the labels. Each trade is flagged if the mayhem agent made it (the agent's wallet comes from the IDL, never hardcoded), so features can also show how much of a coin's activity is the agent's (for example its share of buy volume).
 - Curve state for mayhem coins uses the recorded reserve resets (`mayhem_params`).
+  *(Updated 2026-11-21, closing R6.)* In the backfill this needs no record of the resets: every trade by a person starts exactly from the reserves the previous recorded trade reported (all 14.9 million such trades on Nov 12-17, 3.8 million of them on mayhem coins), because the resets come with the mayhem agent's own trades. Curve state is the reserves after the last recorded trade, the agent's included. The backfill has no `mayhem_params` table.
 
 ---
 
@@ -372,6 +374,13 @@ About a fifth of new coins are in pump.fun's mayhem mode: pump.fun's own agent w
 - Exits mirror the user's Padre presets: take-profit, stop-loss, time stop.
 - Report weekly to check stability.
 - *(After Phase 2.)* Mayhem coins (8.10): the mayhem agent's trades stay in the simulated market, curve state uses the recorded reserve resets, and results are reported separately for mayhem and ordinary coins.
+- *(Added 2026-11-21, closing R6, research track; evidence in `docs/PROGRESS.md`, "R6: backtest as analysis".)* **How the backtest is run:**
+  - **Reserves:** a simulated trade lands on the reserves after the last recorded trade at or before its second, on the curve or, for a graduated coin, in its PumpSwap pool. Mayhem coins need no recorded resets (8.10). A pool's price follows its token reserve and its quote reserve plus its virtual quote reserve. A sale on the curve never pays out more than the curve holds.
+  - **Our own buy, two views, both reported:** it leaves no trace in the market (strict, the headline: on a new curve this understates a 1 SOL sale by about 6% of the stake), or the SOL it put in stays in the reserves (generous: exact when nobody else trades). The truth is between the two.
+  - **Signals:** a buy signal is a score at or above a cut fixed in advance. "The top 5 of the hour" cannot be traded, so each cut is the score that gave that many picks per hour on the validation day; no profit or loss is used to choose it (`config/backtest.yaml`).
+  - **Settings added to `config/padre_presets.yaml`** (test settings, not measured costs): the share of orders that fail (5%; 0% and 10% also shown), the age of the quote the slippage limit is measured against, how often a failed sell is tried again, and Padre's own fee (1% in the headline, the user's cautious choice; 0% as a what-if). A sell lands one entry delay after its trigger.
+  - **The test days are simulated once** (`agent backtest test` refuses a second run and any change after the cuts were frozen). Padre's fee changes no simulated trade, so a report may be built again from the saved trades after a change to it (`--resummarize`).
+  - "Report weekly" is, with nine days of history, a report per day.
 
 ---
 
@@ -468,6 +477,8 @@ Never commit `.env`, data, or anyone's keys.
 *(Added 2026-11-14, closing R2, research track.)* The research dataset (15.3, R2) is built by `src/agent/dataset/build.py` (`agent dataset`), not `features/build_snapshot.py`: nothing under `features` may import the labels (7), and the builder joins the two. It writes `data/dataset/` (`dataset.parquet` and `manifest.json`) rather than `data/features/`. The backfill's coverage, which the labels and the dataset both use, is in `ingest/backfill_coverage.py`.
 
 *(Added 2026-11-21, R5, research track.)* The models (15.3, R5) are in `models/`: `frame.py` (the rows and columns a model may read), `train.py` (baselines, logistic regression, LightGBM, the checks, `agent train` and `agent score-test`), `evaluate.py` (the plan, the split and the metrics) and `report.py` (writes `docs/R5_RESULTS.md`). There is no separate `calibrate.py` or `registry.py`: calibration is part of `train.py`, and the model files with their manifest go to `data/models/r5/`. Backfill-only signals are in `features/backfill_only.py`.
+
+*(Added 2026-11-21, closing R6, research track.)* The backtest (15.3, R6) is `sim/backtest.py` (one simulated trade and its profit or loss), `sim/market.py` (a coin's reserves and fees after every trade, from the backfill), `sim/pool_math.py` (PumpSwap pool math and its check against recorded trades) and `backtest/run.py` + `backtest/report.py` (signals, cuts, the ledger, the report, `agent backtest`; they write `data/backtest/r6/` and `docs/R6_RESULTS.md`). The run code is its own package because nothing under `sim` may import the dataset. There is no `paper_trader.py` on this track.
 
 ---
 
@@ -718,3 +729,7 @@ Not used as training data: single Oct 2024 snapshot, aggregator-sourced (survivo
 **2026-11-21, start of R5** (decided by the user after the leak review, before any model was trained; evidence in `docs/PROGRESS.md`, "R5: models"). Marked in place with "start of R5" or "R5".
 
 27. **Evaluation plan tightened (15.4):** models use whole days only; coins launched within 65 min before the validation or the test days are left out, so no label reads into a later set; `dev_launches_24h` replaces `dev_prior_launches` in the models; stage 1 is also reported as dead or rug alone; SOL-paired coins are modeled; the backfill-only features are named; scoring the test days once is enforced by the commands. **Repo layout (13):** the model code's files. No threshold or "done when" check changed.
+
+**2026-11-21, closing R6** (approved by the user; evidence in `docs/PROGRESS.md`, "R6: backtest as analysis"). Marked in place with "closing R6".
+
+28. **Backtest (8.10, 10, 13, 7):** mayhem curve state is the reserves after the last recorded trade (the backfill has no reset records and needs none); results are reported under two views of our own buy, the strict one as the headline; signals buy at cuts fixed on the validation day by picks per hour; the new test settings in `padre_presets.yaml` and `config/backtest.yaml` are named, with Padre's fee at 1% as a test setting; the test days are simulated once; the backtest's files are listed; the labels' note on mayhem entry prices is corrected in wording only. No threshold or "done when" check changed.

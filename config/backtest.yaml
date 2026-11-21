@@ -1,0 +1,40 @@
+# Backtest as analysis (spec 10; research track step R6). Which signals are simulated and
+# how their results are reported. Fixed before the test days are simulated: `agent
+# backtest test` refuses to run if this file or config/padre_presets.yaml changed after
+# the cuts were chosen on the validation day. Nothing here places a trade.
+#
+# How a trade is simulated (delays, exit plans, slippage, fees, failed transactions) is in
+# config/padre_presets.yaml. pump.fun's and PumpSwap's fees are read from the chain data.
+
+models: r5                      # the saved models in <data folder>/models/r5
+
+# A signal says "buy this coin now" at a decision time (T+30/60/120/300 s), using only
+# what was known then.
+#   all:    every coin.
+#   rules:  the hand-written rules' verdict (config/rules.yaml) is one of `verdicts`.
+#   pick:   a model's score is at or above a cut. "The top 5 of the hour" cannot be traded
+#           (the hour's top 5 are known only when the hour is over), so the cut is the
+#           score that gave `picks_per_hour` picks per hour on average on the validation
+#           day, for each decision time. No profit or loss is used to choose it.
+#   filter: the stage 1 model does not block the coin; it blocks scores above the cut that
+#           blocked at most `max_fine_blocked` of the fine coins on the validation day.
+signals:
+  - {name: everything, label: Every coin, kind: all}
+  - {name: rules_pass, label: "Rules: pass", kind: rules, verdicts: [pass]}
+  - {name: rules_not_avoid, label: "Rules: pass or caution", kind: rules,
+     verdicts: [pass, caution]}
+  - {name: lightgbm_not_bad, label: "LightGBM stage 1: not blocked", kind: filter,
+     stage: bad, model: lightgbm, max_fine_blocked: 0.30}
+  - {name: logistic_2x, label: Logistic regression 2x, kind: pick, stage: hit_2x,
+     model: logistic}
+  - {name: lightgbm_2x, label: LightGBM 2x, kind: pick, stage: hit_2x, model: lightgbm}
+  - {name: lightgbm_grad, label: LightGBM graduation, kind: pick, stage: grad_later,
+     model: lightgbm}
+picks_per_hour: [5, 20]
+
+# Our own buy and the market (sim/backtest.py): `none` = the buy leaves no trace (strict,
+# the headline); `stays` = the SOL it put in stays in the reserves (generous).
+headline_footprint: none
+footprints: [none, stays]
+
+coins_per_batch_hours: 3        # coins are simulated in batches by launch time

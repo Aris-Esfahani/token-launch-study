@@ -24,7 +24,7 @@ Training data is the backfill; the live tools built so far stay as a demo.
 | R3. Exploration | Done 2026-11-14 (user OK'd; branch `r1-labels`) | `notebooks/r3_exploration.ipynb` runs top to bottom on the dataset. Main finding: most graduations happen before the first decision time, so stage 2 now predicts graduating later, for coins still on the curve (spec 7). Results in "R3" below. |
 | R4. More history | Done 2026-11-21 (user OK'd; option B; branch `r1-labels`) | Epochs 1085-1091: 2,755 GB downloaded in 11.3 h, 35 GB kept; one unbroken span of 206.6 h with no gaps. Dataset rebuilt: 367,730 coins, 1,464,896 rows to model on. Results in "R4" below. |
 | R5. Models | Done 2026-11-21 (user OK'd; branch `r5-models`) | Leak review, baselines and LightGBM for stages 1-3; test days Nov 18-19 scored once. LightGBM beats every baseline in every stage; the backfill-only signals add nothing. Results in "R5" below and `docs/R5_RESULTS.md`. |
-| R6. Backtest (analysis) | Not started | |
+| R6. Backtest (analysis) | Done 2026-11-21 (user OK'd; branch `r6-backtest`) | Day plan and lookahead review reported first; test days Nov 18-19 simulated once. No signal made money after costs (every coin: -0.199 SOL per 1 SOL signal under the strict view, -0.068 under the generous one; the best model signal -0.106 and -0.017). Results in "R6" below and `docs/R6_RESULTS.md`. |
 | R7. Write-up | Not started | |
 
 Build order from 2026-11-12 to 2026-11-13: the fast path in spec 15.0 (user's decision,
@@ -38,6 +38,295 @@ verdict, D screen, E paper ledger; the full backfill (Phase 4) runs in the backg
 | C. Live signals + rules verdict | **Built 2026-11-12 (branch `step-b`)** | The engine judges every new token at T+30/60/120/300 s; `agent check-live` compares live with replay. The same feature code builds the research dataset (R2). Results in "Step C" below. |
 | D. Screen | **Built 2026-11-12 (branch `step-b`); kept as a demo** | `agent screen`: alert feed, paste box, clipboard watcher, status bar; the engine answers over a local connection. Results in "Step D" below. |
 | E. Paper ledger | Paused 2026-11-13 (research track) | `padre_presets.yaml` is kept as settings for the R6 backtest. |
+
+## R6: backtest as analysis (research track, built and closed 2026-11-21)
+
+**Done when:** "After-cost P&L per signal with delay sensitivity, per day, mayhem vs.
+ordinary." **Result: met in every part; closed 2026-11-21 with the user's OK.** Every number
+(all signals, decision times, delays, exit plans, days, ordinary / mayhem, with intervals)
+is in [R6_RESULTS.md](R6_RESULTS.md); the tables here are the main ones.
+
+**Short answer: no signal made money after costs on the test days.** Under the strict
+view of our own buy every signal loses 5% to 22% of the 1 SOL stake per signal; under the
+generous view the best signals lose 1-2%, with intervals from about -0.10 to +0.08. The
+models do pick better coins (their buys hit the take-profit 23-31% of the time against 3%
+for buying everything), but a stop-loss that is hit 55% of the time costs more than the
+winners bring.
+
+Built on branch `r6-backtest`:
+- `src/agent/sim/pool_math.py`: PumpSwap pool math (buy with a budget, buy exact tokens,
+  sell; three fees), and a check of it against every recorded pool trade.
+- `src/agent/sim/market.py`: a coin's reserves after every trade, in exact order, on its
+  curve and in its pool, with the fees each trade paid; read from the backfill only.
+- `src/agent/sim/backtest.py`: the simulator (buy, exit plans, sell, slippage, failed
+  orders, the two views of our own buy) and profit and loss per simulated trade.
+- `src/agent/backtest/run.py`, `report.py`: signals, the cuts, the ledger, the report and
+  the once-only guard. Command: `agent backtest validation | train | test`.
+- `config/backtest.yaml` (signals); new test settings in `config/padre_presets.yaml`
+  (failed orders 5%, also 0% and 10%; quote age 2 s; at most 4 failed sells; Padre fee
+  1% with 0% as the what-if), as the user chose on 2026-11-21.
+- Tests: 382 pass (34 new), lint clean.
+
+### Step 1: day plan and lookahead review, before any simulation (reported to the user first)
+
+Facts checked first, on Nov 12-17 only (no test-day trade was read):
+
+| Check | Result |
+|---|---|
+| Curve fees people pay | 0.95% + 0.30% creator fee on every training day, before and after the Nov 15 update. Holder rewards (30 bps on about a third of trades) are part of those fees, not on top (buyers' totals are round numbers without them). On the rare cashback coins the 30 bps cashback fee replaces the creator fee and is on top of the 0.95%. |
+| Mayhem reserve resets | The backfill has no `mayhem_params` table, and does not need one: all 14.9 million trades by people on Nov 12-17, including 3.8 million on mayhem coins, start exactly from the reserves the previous recorded trade reported. The resets come with the mayhem agent's own trades (97% of its trades start from other reserves than the previous trade left). So a person's fill on a mayhem coin is as exact as on an ordinary one. |
+| PumpSwap pools | Trades follow a constant product of the pool's token reserve and its quote reserve **plus the virtual quote reserve**; the fees (liquidity, protocol, creator) are recorded per trade (about 1.2% in total). To be verified on every recorded pool trade when the simulator is built. |
+| Solana's base fee | 5,000 lamports per signature (the lowest fee per signature in the data). |
+
+**Proposed day plan** (to keep the test days honest):
+1. Models and their settings are frozen (R5). A buy signal is a score at or above a fixed
+   cut. "Top 5 per hour" cannot be traded as it is (the hour's top 5 are only known when
+   the hour is over), so each cut is the score that gave 5 (and 20) picks per hour on
+   average on **Nov 17**, per decision time. No P&L is used to choose anything.
+2. The simulator is built, tested and checked on Nov 12-17 only.
+3. Cuts, exit plans, delays and costs are written to `config/backtest.yaml`; its hash and
+   the code's go in the manifest. Then Nov 18-19 are simulated **once**: `agent backtest
+   --test` refuses to run when a test report exists (as `agent score-test` does).
+4. Reported: Nov 18-19 (the result); Nov 17 marked as the day the cuts come from; Nov 12-16
+   only for the signals that were never fitted (buying everything, the rules), for
+   stability across days.
+5. If a mistake is found after the test run, both the old and the corrected numbers are
+   reported.
+
+**Lookahead review of the simulator design:**
+
+| Part | Rule | Lookahead? |
+|---|---|---|
+| Signal | Features at T+k read events up to T+k (R2, R5); the cut is fixed beforehand | No |
+| Entry | At T+k+delay, on the reserves after the last trade at or before that second (curve, or pool for a graduated coin), exact math, the fees of the last person's trade at or before it | No |
+| Slippage check | The quote is the price a little earlier (a setting); the buy fails if the fill is worse than the limit | No |
+| Exit trigger | Only trades after the entry second; take-profit / stop-loss on the price after each trade against the price paid | No |
+| Exit fill | The sell lands the same delay after its trigger (a time stop at its planned time), on the reserves after the last trade at or before then | No |
+| Graduated before the exit | Sold in the PumpSwap pool with the pool formula and the pool's recorded fees | No |
+
+**Limits found, to decide or name:**
+- **Our own buy is not in the market.** With 1 SOL on a new curve (30 SOL deep) this is
+  not small: selling from reserves that lack our own buy costs about 6% of the position
+  (a coin nobody else trades would show -8.6% instead of the true -2.5%). Proposed: report
+  two versions side by side, "our buy leaves no trace" (strict, the headline) and "our
+  SOL stays in the curve" (exact when nobody else trades; optimistic when others sell).
+- Mayhem coins are reported separately (spec 8.10, 10), though their fills are exact.
+- Not in the data: failed transactions, Padre's own fee (`platform_fee_pct` is empty), the
+  rent of a token account. `padre_presets.yaml` has no failed-transaction rate yet.
+
+**The user's decisions (2026-11-21):** the day plan as proposed; both views of our own
+buy, the strict one as the headline; failed orders 5% (also 0% and 10%); a sell lands one
+delay after its trigger; **Padre's fee 1% in the headline, 0% as the what-if** (the plan
+proposed the reverse). The user did not state Padre's real fee: 1% is a cautious test
+setting, not a measured cost.
+
+**The fee headline was switched after the test days had been simulated.** The user's
+pick of 1% was made on the plan, in the R5 session, and reached this session only after
+the run (which had used 0% as the headline and 1% as the what-if, on the "Yes, go ahead"
+given here). Nothing was simulated again: the fee changes no simulated trade, only what
+is taken off each result. `agent backtest <days> --resummarize` built the three reports
+again from the same ledger files (their hashes are checked; any other change is refused;
+tested), and the reports it replaced are kept beside them
+(`*_report_before_20261121T11....json`). Both fee settings were in the first report and
+are in this one; they only swapped columns.
+
+Decided while building, all before any test-day result (each is in the settings files or
+the module notes):
+- **Signals:** every coin; the rules (pass; pass or caution); LightGBM stage 1 as a filter
+  (not blocked, at the validation day's "at most 30% of fine coins blocked" cut); logistic
+  regression and LightGBM for 2x-before-0.5x, and LightGBM for graduation, each at about 5
+  and about 20 picks per hour. The "+ backfill-only" models are left out (R5: no gain).
+- **Also reported:** a coin's first signal only (buying a coin once).
+- **A curve cannot pay out more than it holds** (the SOL it recorded plus what our buy put
+  in). Found on the validation day: mayhem coins' price-setting reserves are sometimes
+  reset far above their real SOL. It lowered "every coin" on Nov 17 from -0.174 to -0.190
+  SOL (at a 0% Padre fee); ordinary coins did not change.
+- **A buy that would take every token left on the curve** stops there and is flagged. On
+  mayhem coins the reserves are often reset so low that 1 SOL would do this (7% of mayhem
+  signals, half of the graduation model's mayhem picks).
+
+### Step 2: checks on Nov 12-17, before the test days were simulated
+
+| Check | Result |
+|---|---|
+| Tests | 382 pass. New: pool math against four real pool trades; a curve buy and a round trip worked out by hand (1 SOL on a new curve: 987,654,320 lamports into the curve, 34,199,203,120,618 tokens, fees 9,382,717 + 2,962,963); take-profit, stop-loss, time stop; slippage; failed orders; the move to the pool; the payout cap; the cuts; the once-only guard; the report's numbers against the ledger by hand. |
+| No lookahead (tests) | A trade after the buy's second changes nothing in the buy; a trade after the last sell changes nothing in the row; a trade in the sell's own second does change it. Cutting a market's data at any second gives the same reserves and fees there as the whole market. |
+| Real fills, curve | On a 3-hour slice of Nov 16: pricing each real order with the simulator's own inputs (reserves after the previous trade, fees of the last paying trade before it) reproduces the chain's numbers for 81,954 of 81,954 set-budget buys and 99,310 of 99,310 sells, mayhem coins included. 436 of those buys were a coin's first trade, priced with fees from other coins' first trades. |
+| Real fills, pool | Nov 17: sells 100.000% exact (2,314,137), buys of exact tokens 99.9997%; 99.999% of pool trades start where the previous one ended. For buys with a budget the tokens for the SOL that reached the pool are exact in 100%; in 3% the buyer's budget was 0.5-1.6% larger than what the pool and its three fees took (most likely a trading app's own fee; my reading, the data does not say). The fees the simulator would use in a pool equal the fees the next trade paid in 97.8%. |
+| Same result when rebuilt | The validation day built twice: 8 ledger files byte-identical, all 8,100 report cells identical. Also a test. |
+| Largest win looked at | +76 SOL on 1 SOL in 5 minutes: an ordinary coin that graduated and kept rising in its pool. Real, not an error; such coins move the averages. |
+| Frozen | `frozen.json`: hashes of both settings files, the cuts, the code and the R5 model files. `agent backtest test` refuses when any changed, and refuses a second run (tested). |
+
+### Test days Nov 18-19, simulated once (3:10 AM PST, Nov 21)
+
+65,865 coins (30,486 ordinary, 35,379 mayhem), 263,460 coin and decision-time rows,
+2,371,140 simulated trades. Numbers are profit or loss in SOL per signal on a 1 SOL buy
+(-0.100 = 10% of the stake lost), all four decision times together, 5 s delay; in
+brackets, 95% intervals from resampling whole launch hours. The reports were built again
+from the same trades at 3:20 AM PST with the 1% Padre fee in the headline (see above).
+
+**Headline: our buy leaves no trace (strict), 5% of orders fail, Padre fee 1%.**
+
+| Signal (rows bought) | `double_or_half` | `quick_50_25` | `hold_5_min` |
+|---|---|---|---|
+| Every coin (263,460) | -0.199 (-0.204 to -0.194) | -0.190 (-0.195 to -0.185) | -0.222 (-0.228 to -0.216) |
+| Rules: pass (8,297) | -0.108 (-0.112 to -0.104) | -0.106 (-0.110 to -0.103) | -0.106 (-0.109 to -0.103) |
+| Rules: pass or caution (107,496) | -0.176 (-0.182 to -0.169) | -0.162 (-0.168 to -0.157) | -0.208 (-0.217 to -0.199) |
+| LightGBM stage 1: not blocked (47,825) | -0.131 (-0.137 to -0.123) | -0.121 (-0.126 to -0.115) | -0.124 (-0.128 to -0.120) |
+| Logistic 2x, about 5 per hour (771) | -0.122 (-0.217 to -0.005) | -0.094 (-0.156 to -0.012) | -0.173 (-0.257 to -0.071) |
+| Logistic 2x, about 20 per hour (3,142) | -0.083 (-0.151 to +0.003) | -0.048 (-0.101 to +0.021) | -0.104 (-0.164 to -0.034) |
+| LightGBM 2x, about 5 per hour (758) | -0.140 (-0.238 to -0.045) | -0.111 (-0.170 to -0.047) | -0.126 (-0.237 to -0.017) |
+| LightGBM 2x, about 20 per hour (2,842) | -0.131 (-0.184 to -0.067) | -0.080 (-0.114 to -0.037) | -0.146 (-0.202 to -0.080) |
+| LightGBM graduation, about 5 per hour (807) | -0.145 (-0.231 to -0.049) | -0.123 (-0.191 to -0.044) | -0.155 (-0.260 to -0.036) |
+| LightGBM graduation, about 20 per hour (3,011) | -0.106 (-0.182 to -0.013) | -0.097 (-0.154 to -0.026) | -0.142 (-0.213 to -0.060) |
+
+**The generous view: our SOL stays in the reserves** (same fee and failed orders).
+
+| Signal | `double_or_half` | `quick_50_25` | `hold_5_min` |
+|---|---|---|---|
+| Every coin | -0.068 (-0.071 to -0.065) | -0.059 (-0.061 to -0.057) | -0.084 (-0.086 to -0.082) |
+| Rules: pass | -0.053 (-0.057 to -0.049) | -0.051 (-0.055 to -0.048) | -0.051 (-0.054 to -0.048) |
+| Rules: pass or caution | -0.079 (-0.083 to -0.075) | -0.066 (-0.069 to -0.063) | -0.101 (-0.106 to -0.096) |
+| LightGBM stage 1: not blocked | -0.079 (-0.085 to -0.071) | -0.069 (-0.074 to -0.063) | -0.072 (-0.076 to -0.067) |
+| Logistic 2x, about 5 per hour | -0.102 (-0.196 to +0.016) | -0.072 (-0.134 to +0.011) | -0.152 (-0.238 to -0.049) |
+| Logistic 2x, about 20 per hour | -0.054 (-0.122 to +0.033) | -0.018 (-0.072 to +0.050) | -0.071 (-0.131 to -0.002) |
+| LightGBM 2x, about 5 per hour | -0.120 (-0.220 to -0.025) | -0.090 (-0.151 to -0.026) | -0.106 (-0.218 to +0.005) |
+| LightGBM 2x, about 20 per hour | -0.104 (-0.159 to -0.040) | -0.052 (-0.085 to -0.010) | -0.113 (-0.169 to -0.047) |
+| LightGBM graduation, about 5 per hour | -0.096 (-0.184 to +0.000) | -0.074 (-0.140 to +0.008) | -0.103 (-0.207 to +0.014) |
+| LightGBM graduation, about 20 per hour | -0.017 (-0.095 to +0.079) | -0.008 (-0.066 to +0.062) | -0.040 (-0.110 to +0.044) |
+
+**Delay sensitivity** (`double_or_half`, headline):
+
+| Signal | 2 s | 5 s | 10 s |
+|---|---|---|---|
+| Every coin | -0.197 (-0.201 to -0.191) | -0.199 (-0.204 to -0.194) | -0.203 (-0.208 to -0.197) |
+| Rules: pass | -0.108 (-0.112 to -0.105) | -0.108 (-0.112 to -0.104) | -0.108 (-0.112 to -0.105) |
+| LightGBM stage 1: not blocked | -0.132 (-0.138 to -0.125) | -0.131 (-0.137 to -0.123) | -0.130 (-0.137 to -0.122) |
+| Logistic 2x, about 20 per hour | -0.088 (-0.152 to -0.016) | -0.083 (-0.151 to +0.003) | -0.097 (-0.173 to +0.007) |
+| LightGBM 2x, about 5 per hour | -0.139 (-0.242 to -0.036) | -0.140 (-0.238 to -0.045) | -0.139 (-0.226 to -0.050) |
+| LightGBM 2x, about 20 per hour | -0.142 (-0.190 to -0.089) | -0.131 (-0.184 to -0.067) | -0.132 (-0.194 to -0.054) |
+| LightGBM graduation, about 20 per hour | -0.137 (-0.192 to -0.074) | -0.106 (-0.182 to -0.013) | -0.112 (-0.205 to +0.013) |
+
+**Per day** (`double_or_half`, headline; signals in square brackets):
+
+| Signal | Nov 18 | Nov 19 |
+|---|---|---|
+| Every coin | -0.199 (-0.206 to -0.192) [139,672] | -0.200 (-0.208 to -0.193) [123,788] |
+| Rules: pass | -0.109 (-0.116 to -0.103) [4,549] | -0.107 (-0.112 to -0.101) [3,748] |
+| LightGBM stage 1: not blocked | -0.134 (-0.140 to -0.128) [26,009] | -0.126 (-0.138 to -0.111) [21,816] |
+| Logistic 2x, about 20 per hour | -0.077 (-0.159 to +0.016) [1,511] | -0.088 (-0.198 to +0.048) [1,631] |
+| LightGBM 2x, about 5 per hour | -0.179 (-0.310 to -0.036) [373] | -0.102 (-0.228 to +0.034) [385] |
+| LightGBM 2x, about 20 per hour | -0.170 (-0.226 to -0.113) [1,400] | -0.092 (-0.186 to +0.016) [1,442] |
+| LightGBM graduation, about 5 per hour | -0.230 (-0.321 to -0.133) [383] | -0.068 (-0.191 to +0.067) [424] |
+| LightGBM graduation, about 20 per hour | -0.135 (-0.198 to -0.068) [1,481] | -0.078 (-0.208 to +0.083) [1,530] |
+
+**Ordinary vs. mayhem coins** (`double_or_half`; signals in square brackets):
+
+| Signal | Ordinary, strict | Mayhem, strict | Ordinary, generous | Mayhem, generous |
+|---|---|---|---|---|
+| Every coin | -0.111 (-0.116 to -0.105) [121,944] | -0.276 (-0.280 to -0.271) [141,516] | -0.058 (-0.062 to -0.052) | -0.078 (-0.079 to -0.076) |
+| Rules: pass or caution | -0.111 (-0.115 to -0.108) [78,374] | -0.348 (-0.355 to -0.342) [29,122] | -0.057 (-0.060 to -0.053) | -0.140 (-0.145 to -0.135) |
+| LightGBM stage 1: not blocked | -0.129 (-0.136 to -0.122) [47,556] | -0.335 (-0.406 to -0.253) [269] | -0.079 (-0.085 to -0.071) | -0.076 (-0.111 to -0.028) |
+| Logistic 2x, about 20 per hour | -0.069 (-0.140 to +0.024) [2,908] | -0.259 (-0.334 to -0.178) [234] | -0.045 (-0.117 to +0.048) | -0.165 (-0.233 to -0.088) |
+| LightGBM 2x, about 5 per hour | -0.140 (-0.238 to -0.045) [758] | - [0] | -0.120 (-0.220 to -0.025) | - |
+| LightGBM 2x, about 20 per hour | -0.117 (-0.176 to -0.046) [2,597] | -0.280 (-0.347 to -0.206) [245] | -0.095 (-0.156 to -0.025) | -0.193 (-0.251 to -0.127) |
+| LightGBM graduation, about 20 per hour | -0.036 (-0.136 to +0.089) [2,261] | -0.316 (-0.341 to -0.289) [750] | -0.010 (-0.111 to +0.117) | -0.039 (-0.056 to -0.022) |
+
+**Other assumptions** (`double_or_half`, all coins; one change from the headline at a time):
+
+| Signal | Headline | 0% of orders fail | 10% of orders fail | Padre fee 0% |
+|---|---|---|---|---|
+| Every coin | -0.199 (-0.204 to -0.194) | -0.210 (-0.215 to -0.204) | -0.189 (-0.194 to -0.184) | -0.183 (-0.188 to -0.177) |
+| Rules: pass | -0.108 (-0.112 to -0.104) | -0.114 (-0.118 to -0.110) | -0.103 (-0.107 to -0.099) | -0.090 (-0.094 to -0.086) |
+| LightGBM stage 1: not blocked | -0.131 (-0.137 to -0.123) | -0.138 (-0.144 to -0.130) | -0.123 (-0.129 to -0.116) | -0.113 (-0.119 to -0.105) |
+| Logistic 2x, about 20 per hour | -0.083 (-0.151 to +0.003) | -0.092 (-0.165 to -0.001) | -0.067 (-0.133 to +0.016) | -0.065 (-0.134 to +0.021) |
+| LightGBM 2x, about 5 per hour | -0.140 (-0.238 to -0.045) | -0.141 (-0.242 to -0.045) | -0.134 (-0.225 to -0.046) | -0.122 (-0.221 to -0.026) |
+| LightGBM 2x, about 20 per hour | -0.131 (-0.184 to -0.067) | -0.138 (-0.192 to -0.073) | -0.114 (-0.171 to -0.045) | -0.113 (-0.167 to -0.049) |
+| LightGBM graduation, about 20 per hour | -0.106 (-0.182 to -0.013) | -0.119 (-0.197 to -0.024) | -0.088 (-0.166 to +0.007) | -0.090 (-0.167 to +0.003) |
+
+**What happened to the buys** (`double_or_half`, headline, all four decision times):
+
+| Signal | Bought | Of those in profit | Take-profit | Stop-loss | Time stop | Median |
+|---|---|---|---|---|---|---|
+| Every coin | 93% | 3.1% | 3.0% | 13% | 77% | -0.106 |
+| Rules: pass | 95% | 3.0% | 0.9% | 0.2% | 94% | -0.105 |
+| LightGBM stage 1: not blocked | 95% | 4.7% | 2.8% | 5.9% | 86% | -0.120 |
+| Logistic 2x, about 20 per hour | 93% | 29% | 23% | 57% | 13% | -0.536 |
+| LightGBM 2x, about 5 per hour | 95% | 36% | 31% | 55% | 8.6% | -0.541 |
+| LightGBM 2x, about 20 per hour | 93% | 31% | 25% | 56% | 12% | -0.529 |
+| LightGBM graduation, about 20 per hour | 91% | 21% | 19% | 65% | 7.3% | -0.537 |
+
+**How to read it:**
+- **Nothing is profitable.** Under the strict view every signal loses 5% to 22% of the
+  stake per signal. Under the generous view the best cells (LightGBM graduation at about
+  20 per hour: -0.017 and -0.008) are still below zero, with intervals of about +/-0.08
+  that reach above it. The truth is between the two views.
+- **The models find the movers but not a profit.** Their picks hit +100% before -50% in
+  23-31% of buys (R5's precision said 27-38%), but the stop-loss is hit in about 55% and
+  lands late (one delay after the trigger, in a falling market), so the typical model
+  trade loses about half the stake.
+- **Buying a coin nobody trades costs 10.5% (strict) or 4.5% (generous):** that is the
+  floor for "every coin" and "rules: pass". Of it, 2.5% is pump.fun's fees, about 1.9% the
+  1% Padre fee on the buy and on the sale, 0.1% transaction fees, and in the strict view
+  another 6% is the footprint limit.
+- **Delay barely matters** between 2 s and 10 s: the differences are inside the intervals.
+- **The two days agree for the unfitted signals** and differ for the model signals (Nov 18
+  worse), with wide intervals: a few hundred trades a day is little.
+- **Mayhem coins are worse in every row,** and their strict and generous numbers are far
+  apart (their reserves are small after resets, so 1 SOL is a large trade). The LightGBM
+  2x signal at 5 per hour picked no mayhem coin on the test days.
+- **Fewer failed orders is worse, not better** (0%: -0.210; 5%: -0.199; 10%: -0.189 for
+  every coin): a failed buy avoids a trade that loses on average.
+- **Padre's fee:** the 1% in the headline is the user's cautious test setting, not a
+  measured cost. Without it every number is 0.016-0.018 better per signal ("Padre fee 0%"
+  above), which changes no conclusion.
+
+### Training days Nov 12-16: the unfitted signals, for stability
+
+165,664 coins, 5,963,904 simulated trades. `double_or_half`, headline, all four decision times, 5 s delay. The models learned from these days, so only the signals that were never fitted are shown.
+
+| Signal | Nov 12 | Nov 13 | Nov 14 | Nov 15 | Nov 16 | All five days | Generous view, all five days |
+|---|---|---|---|---|---|---|---|
+| Every coin | -0.195 (-0.201 to -0.189) | -0.202 (-0.207 to -0.197) | -0.209 (-0.214 to -0.204) | -0.202 (-0.209 to -0.197) | -0.198 (-0.204 to -0.192) | -0.201 (-0.204 to -0.199) | -0.072 (-0.073 to -0.071) |
+| Rules: pass | -0.106 (-0.111 to -0.101) | -0.091 (-0.109 to -0.067) | -0.106 (-0.114 to -0.093) | -0.114 (-0.118 to -0.110) | -0.114 (-0.118 to -0.109) | -0.106 (-0.111 to -0.101) | -0.051 (-0.056 to -0.046) |
+| Rules: pass or caution | -0.176 (-0.184 to -0.168) | -0.191 (-0.200 to -0.184) | -0.199 (-0.206 to -0.192) | -0.186 (-0.196 to -0.178) | -0.178 (-0.186 to -0.172) | -0.186 (-0.190 to -0.182) | -0.085 (-0.087 to -0.083) |
+
+Ordinary / mayhem, every coin: -0.118 (-0.120 to -0.116) / -0.271 (-0.274 to -0.268). The same picture on every day, before and after the Nov 15 program update: no day on which buying everything, or what the rules pass, made money.
+
+### Limits
+
+- **Our own buy is not in the market.** The strict and generous views bracket it; a full
+  replay of every later trade on a curve that holds our buy was not built.
+- **Two test days, one market,** both after the Nov 15 program update. Means are moved by
+  rare coins that rise 50-fold; the intervals only cover hour-to-hour variation.
+- **Mayhem coins:** fills are exact, but what a 1 SOL buy would do to a curve whose
+  reserves the mayhem program resets cannot be known; 6.6% of mayhem signals would have
+  taken every token left.
+- **Guesses in the settings:** failed orders, the quote age, the priority fee, and Padre's
+  fee (1% is the user's cautious choice; the real fee has not been checked).
+- **Pool fees** are taken from the pool's recent trades (right 97.8% of the time; the rest
+  differ by a few hundredths of a percent). Token-account rent is not counted.
+- **Exit plans were not tuned.** The three in `padre_presets.yaml` were guesses from before
+  any data; a better plan may exist, and finding one on these days would be overfitting.
+- **Thresholds by count, not by value:** cuts were set by picks per hour. A cut chosen by
+  expected value on the validation day was not tried.
+
+### Spec notes (added 2026-11-21 with the user's OK; spec change-log entry 28)
+
+1. **Spec 10 and 8.10, mayhem reserves:** "curve state uses the recorded reserve resets
+   (`mayhem_params`)" cannot be done as written (the backfill has no such table) and is
+   not needed: the reserves after the last recorded trade are exact. Replace with that.
+2. **Spec 10, our own buy:** add that results are reported under two views (no trace;
+   our SOL stays), with the strict one as the headline.
+3. **Spec 10, settings:** name the new `padre_presets.yaml` settings (failed orders, quote
+   age, sell retries, Padre's fee at 1% as a test setting) and `config/backtest.yaml`.
+4. **Spec 13, layout:** the backtest is `sim/backtest.py`, `sim/market.py`,
+   `sim/pool_math.py` and `backtest/run.py`, `backtest/report.py`; there is no
+   `paper_trader.py` on this track.
+5. **Spec 7, note 5 and `labels/make_labels.py`:** the note that mayhem entry prices are
+   "less exact" is out of date (labels unchanged; only the wording). Corrected in the
+   spec. The module's own note is left as it is: that file's hash is recorded with the
+   dataset the models were trained on, so it is better changed with the next rebuild.
 
 ## R5: models (research track, built and closed 2026-11-21)
 

@@ -690,6 +690,59 @@ def score_test(
 
 
 @app.command()
+def backtest(
+    days: Annotated[str, typer.Argument(help="validation, train or test.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Do not ask before the test days.")] = False,
+    resummarize: Annotated[bool, typer.Option(
+        "--resummarize", help="Build the report again from the saved trades, without "
+        "simulating, after a change to Padre's fee.")] = False,
+) -> None:
+    """Backtest as analysis (spec 10, 15.3 step R6): simulate 1 SOL buys after each signal
+    with exact curve and pool math, the fees recorded on chain and the exit plans in
+    config/padre_presets.yaml. `validation` chooses the score cuts and freezes them;
+    `train` reports the unfitted signals on the training days; `test` simulates the test
+    days, once. Nothing is traded. Results go to docs/R6_RESULTS.md."""
+    from agent.backtest.report import money, write_results
+    from agent.backtest.run import ALL_TIMES, SETS, NotAllowed
+    from agent.backtest.run import resummarize as again
+    from agent.backtest.run import run as simulate
+    from agent.models.evaluate import load_plan
+
+    if days not in SETS:
+        typer.echo(f"Unknown days {days!r}: one of {', '.join(SETS)}.")
+        raise typer.Exit(1)
+    cfg = load_config()
+    plan, _ = load_plan(cfg.root / "config" / "evaluation.yaml")
+    if days == "test" and not resummarize and not yes and not typer.confirm(
+        "This simulates the test days. It can be done once. Go on?"
+    ):
+        raise typer.Exit(1)
+    try:
+        report = (again if resummarize else simulate)(
+            cfg.root, cfg.data_dir, plan, days, progress=typer.echo)
+    except (NotAllowed, FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from None
+    presets = report["presets"]
+    delay = presets["entry_delay_s"]
+    typer.echo("")
+    typer.echo(f"Mean profit or loss per signal in SOL ({delay} s delay, all four decision "
+               "times, headline setting), by exit plan:")  # fmt: skip
+    plans = [p["name"] for p in presets["exit_plans"]]
+    typer.echo(f"  {'':42s}" + "".join(f"{p:>32s}" for p in plans))
+    cells = {(c["signal"], c["plan"]): c for c in report["cells"]
+             if c["time"] == ALL_TIMES and c["delay_s"] == delay and c["slice"] == "all"
+             and c["variant"] == "headline"}  # fmt: skip
+    for signal, info in report["signals"].items():
+        typer.echo(f"  {info['label'][:40]:42s}" + "".join(
+            f"{money(cells[(signal, p)].get('mean_pnl_sol')):>32s}" for p in plans))  # fmt: skip
+    path = write_results(cfg.root, cfg.data_dir)
+    typer.echo("")
+    typer.echo(f"{report['ledger']['rows']:,} simulated trades in {report['seconds']} s; "
+               f"results written to {path}")  # fmt: skip
+
+
+@app.command()
 def signals(
     hours: Annotated[float, typer.Option(help="Tokens created in this many recent hours.")] = 2.0,
     at: Annotated[int, typer.Option(help="Seconds after creation to judge each token.")] = 60,
