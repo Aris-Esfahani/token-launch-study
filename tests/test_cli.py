@@ -162,3 +162,94 @@ def test_alerts_shows_the_newest_alert_lines(project):
     result = runner.invoke(agentd_app, ["alerts", "--last", "2"])
     assert result.exit_code == 0
     assert [ln.split("  ")[1] for ln in result.output.splitlines()] == ["MINT3", "MINT4"]
+
+
+def _fake_epochs(monkeypatch, outcomes):
+    """Replace the per-epoch download with one that returns (or raises) `outcomes`."""
+    import agent.cli.agent as cli
+
+    called = []
+
+    def fake(cfg, epoch, **kwargs):
+        called.append((epoch, kwargs["ask"]))
+        outcome = outcomes[epoch]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(cli, "_backfill_epoch", fake)
+    return called
+
+
+def test_backfill_runs_several_epochs_and_one_stop_stops_them_all(project, monkeypatch):
+    called = _fake_epochs(monkeypatch, {1085: "done", 1086: "stopped", 1087: "done"})
+    result = runner.invoke(agent_app, ["backfill", "--epoch", "1085-1087", "--yes"])
+    assert [e for e, _ in called] == [1085, 1086]  # 1087 never starts
+    assert result.exit_code == 130 and "Not finished: epoch 1086, 1087" in result.output
+
+    # Ctrl+C outside a download (e.g. while waiting for an epoch to be published).
+    called = _fake_epochs(monkeypatch, {1085: KeyboardInterrupt(), 1086: "done"})
+    result = runner.invoke(agent_app, ["backfill", "--epoch", "1085-1086", "--yes"])
+    assert [e for e, _ in called] == [1085] and result.exit_code == 130
+
+
+def test_backfill_asks_once_for_several_epochs_and_reports_failures(project, monkeypatch):
+    called = _fake_epochs(monkeypatch, {1085: "failed", 1086: "done"})
+    result = runner.invoke(agent_app, ["backfill", "--epoch", "1085,1086"], input="y\n")
+    assert called == [(1085, False), (1086, False)]  # asked once, up front
+    assert result.exit_code == 1 and "failed in epoch 1085" in result.output
+
+    called = _fake_epochs(monkeypatch, {1085: "done"})
+    result = runner.invoke(agent_app, ["backfill", "--epoch", "1085-1086"], input="n\n")
+    assert called == [] and result.exit_code == 1
+
+    called = _fake_epochs(monkeypatch, {1085: "done"})
+    assert runner.invoke(agent_app, ["backfill", "--epoch", "1085"]).exit_code == 0
+    assert called == [(1085, True)]  # a single epoch asks with its exact size
+
+    result = runner.invoke(agent_app, ["backfill", "--epoch", "1085-1086", "--from-slot", "5"])
+    assert result.exit_code == 2
+
+
+def _http_error(code: int):
+    import httpx
+
+    request = httpx.Request("GET", "https://files.old-faithful.net/1091/epoch-1091.car")
+    return httpx.HTTPStatusError(
+        f"HTTP {code}", request=request, response=httpx.Response(code, request=request)
+    )
+
+
+def test_backfill_wait_rides_out_rate_limits_but_not_real_errors(project, monkeypatch):
+    import httpx
+
+    import agent.cli.agent as cli
+    from agent.ingest.oldfaithful_backfill import BackfillError
+
+    class Archive:  # the slot index read fails in a given order
+        def __init__(self, errors):
+            self.errors = list(errors)
+
+        def load_index(self, client):
+            raise self.errors.pop(0)
+
+    sleeps = []
+    monkeypatch.setattr(cli.time, "sleep", sleeps.append)
+
+    def run(errors, *flags):
+        monkeypatch.setattr(cli, "_backfill", lambda *a, **k: Archive(errors))
+        return runner.invoke(agent_app, ["backfill", "--epoch", "1091", "--yes", *flags])
+
+    # What happened on 2026-11-19: a 429 while waiting for the epoch to be published.
+    not_yet = BackfillError("epoch 1091 is not in the archive (yet)")
+    errors = [not_yet, _http_error(429), httpx.ConnectError("dropped"), not_yet,
+              _http_error(403)]  # fmt: skip
+    result = run(errors, "--wait")
+    assert len(sleeps) == 4 and result.exit_code == 1
+    assert "HTTP 429 (temporary); checking again" in result.output
+    assert "could not reach the archive (ConnectError); checking again" in result.output
+    assert "Could not read the epoch's slot index: HTTP 403" in result.output  # not temporary
+
+    sleeps.clear()  # without --wait, a temporary error still ends the command at once
+    result = run([_http_error(429)])
+    assert sleeps == [] and result.exit_code == 1

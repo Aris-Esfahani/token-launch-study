@@ -51,6 +51,21 @@ class BackfillError(RuntimeError):
     pass
 
 
+# Answers that mean "try again later" (rate limits, server trouble), not "this will never
+# work". The archive sent a 429 once while we were waiting for an epoch to be published.
+TEMPORARY_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def temporary_problem(exc: Exception) -> str | None:
+    """A short reason if `exc` may clear up by itself (rate limit, server or network
+    trouble); None if it will not."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in TEMPORARY_HTTP:
+        return f"the archive answered HTTP {exc.response.status_code} (temporary)"
+    if isinstance(exc, httpx.TransportError):  # timeouts, dropped connections
+        return f"could not reach the archive ({type(exc).__name__})"
+    return None
+
+
 @dataclass(frozen=True)
 class Chunk:
     id: int
@@ -492,6 +507,26 @@ class Backfill:
         return self.index.first_slot
 
 
+def parse_epochs(text: str) -> list[int]:
+    """'1085', '1085-1091' or '1085,1087' as epochs in the order given, without repeats."""
+    out: list[int] = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        low, _, high = part.partition("-")
+        try:
+            first, last = int(low), int(high or low)
+        except ValueError:
+            raise ValueError(f"not an epoch or a range of epochs: {part!r}") from None
+        if last < first:
+            raise ValueError(f"the range {part} goes backwards")
+        out.extend(e for e in range(first, last + 1) if e not in out)
+    if not out:
+        raise ValueError("no epoch given")
+    return out
+
+
 def _runs(ids: list[int]) -> list[tuple[int, int]]:
     out: list[tuple[int, int]] = []
     for i in ids:
@@ -546,6 +581,8 @@ def measurements(backfill: Backfill, index: SlotIndex | None = None) -> dict:
         "unreadable": stats.get("unreadable", 0),
         "decode_errors": stats.get("decode_errors", 0),
         "truncated": stats.get("truncated", 0),
+        "unknown_events": stats.get("unknown_events", 0),
+        "stale_idl_events": stats.get("stale_idl_events", 0),
         "rows": {k[6:]: v for k, v in sorted(stats.items()) if k.startswith("rows: ")},
     }  # fmt: skip
     if chain_s:

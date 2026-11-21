@@ -1,0 +1,46 @@
+# Evaluation plan, research track (spec 15.4). Fixed before any results: do not loosen it
+# later. Written 2026-11-14 at the start of R3, before any model exists, so that
+# exploration already leaves the held-out days alone.
+
+split:
+  # Whole UTC days the backfill covers, oldest to newest. The most recent quarter of them
+  # (rounded up, and at least min_test_days) is the test set, scored once at the end.
+  test_share: 0.25
+  min_test_days: 2
+  # The days just before the test days: tuning and calibration.
+  validation_days: 1
+  # With fewer whole days than test + validation + this, nothing is held out yet.
+  min_train_days: 1
+  # Exploration (R3) and training use only what comes before the validation days.
+
+# Every model is compared with these (15.4).
+baselines:
+  - base_rate            # always predicting the most common outcome
+  - rules                # config/rules.yaml
+  - logistic_regression
+
+metrics:
+  stage1:                # bad coins (rug, dead or bundled)
+    - pr_auc
+    - recall_at_max_fine_blocked
+  max_fine_blocked: 0.30 # recall of bad coins when blocking at most 30% of fine ones
+  stage2_3:              # graduation, and 2x before 0.5x
+    - pr_auc
+    - precision_top_5_per_hour
+    - precision_top_20_per_hour
+    - brier_score
+    - calibration_curve
+
+uncertainty:
+  # Coins launched in the same hour are not independent: resample whole hours.
+  method: resample_whole_hours
+  level: 0.95
+  resamples: 2000
+  seed: 0
+
+report_separately:
+  - mayhem_vs_ordinary
+  - each_test_day
+  - with_and_without_backfill_only_features
+
+report_every_result: true  # including models that lose to the baselines

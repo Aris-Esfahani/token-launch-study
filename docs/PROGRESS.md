@@ -19,10 +19,10 @@ Training data is the backfill; the live tools built so far stay as a demo.
 | Research step | State | Notes |
 |---|---|---|
 | R0. Close the live side | Done 2026-11-13 (user OK'd) | The user stopped the engine at 10:11 AM PST, Nov 13. The audit met Phase 1's check (7:03 PM); Phase 1 closed with the user's OK. Branch `step-b` brought into `main` by fast-forward (user's OK); the main folder's older uncommitted copies of the step C files, all superseded by `step-b`, were set aside in a labeled git stash. |
-| R1. Labels | Not started | Starts on epoch 1084, already on disk (no download). `is_bundled_proxy` stands in for the bundle label (spec 7). |
-| R2. Dataset | Not started | One row per coin and cutoff, features plus labels. |
-| R3. Exploration | Not started | Needs Jupyter and plotting packages (free; the user installs them). |
-| R4. More history | Not started | 7 more days: about 2.7 TB to download, about 12 h, about 37 GB kept. Asked for first. |
+| R1. Labels | Done 2026-11-14 (user OK'd; branch `r1-labels`) | `agent labels`: 45,439 coins from epoch 1084, 43,022 with every label known. Results in "R1" below. |
+| R2. Dataset | Done 2026-11-14 (user OK'd; branch `r1-labels`) | `agent dataset`: 181,756 rows (45,439 coins x 4 cutoffs), 172,088 to model on; rebuilt byte-identical. Results in "R2" below. |
+| R3. Exploration | Done 2026-11-14 (user OK'd; branch `r1-labels`) | `notebooks/r3_exploration.ipynb` runs top to bottom on the dataset. Main finding: most graduations happen before the first decision time, so stage 2 now predicts graduating later, for coins still on the curve (spec 7). Results in "R3" below. |
+| R4. More history | Done 2026-11-21 (user OK'd; option B; branch `r1-labels`) | Epochs 1085-1091: 2,755 GB downloaded in 11.3 h, 35 GB kept; one unbroken span of 206.6 h with no gaps. Dataset rebuilt: 367,730 coins, 1,464,896 rows to model on. Results in "R4" below. |
 | R5. Models | Not started | Evaluation plan in spec 15.4, written to `config/evaluation.yaml` before any test-day scores. |
 | R6. Backtest (analysis) | Not started | |
 | R7. Write-up | Not started | |
@@ -38,6 +38,327 @@ verdict, D screen, E paper ledger; the full backfill (Phase 4) runs in the backg
 | C. Live signals + rules verdict | **Built 2026-11-12 (branch `step-b`)** | The engine judges every new token at T+30/60/120/300 s; `agent check-live` compares live with replay. The same feature code builds the research dataset (R2). Results in "Step C" below. |
 | D. Screen | **Built 2026-11-12 (branch `step-b`); kept as a demo** | `agent screen`: alert feed, paste box, clipboard watcher, status bar; the engine answers over a local connection. Results in "Step D" below. |
 | E. Paper ledger | Paused 2026-11-13 (research track) | `padre_presets.yaml` is kept as settings for the R6 backtest. |
+
+## R4: more history (research track; plan 2026-11-18, downloaded 2026-11-19 to 2026-11-21, closed 2026-11-21)
+
+**Closed 2026-11-21 with the user's OK.** The user OK'd option B on 2026-11-19 (epochs
+1085-1091). Spec note (added to spec 16 with change-log entry 26, user's OK): the Nov 15
+program update is inside the data; layouts unchanged, behaviour or fees may differ; the
+backtest uses fees read from the chain for after it.
+
+**Done when:** "Complete coverage, gaps logged; download, disk and time documented."
+
+| Check | Result |
+|---|---|
+| Coverage | **One unbroken span**, Nov 11 2:18 PM to Nov 20 4:52 AM PST: 206.6 h, epochs 1084-1091. Every epoch has 6,750 of 6,750 chunks, none failed. |
+| Gaps logged | The gap logs of all 8 epochs are empty. Rows per hour over the 205 whole hours: no hour under 40% of the median. Fewest in an hour: 854 launches, 104,060 curve trades, 467,571 PumpSwap trades (medians 1,696, 186,814 and 682,693; the low hours are the daily rhythm). |
+| Read problems | 0 unreadable transactions, 0 undecodable events, 0 unknown events, 0 cut-off logs in every epoch. The 8-byte tail on trade events is as in 1084 (Phase 1); nothing new after the Nov 15 update. |
+| Duplicates | None: 367,730 launches are 367,730 different coins, and epoch 1091 (stopped and continued 3 times) has no repeated event. |
+| Download | 2,755 GB for 1085-1091 (3,165 GB with the 1084 pilot), at 63-65 MB/s. |
+| Disk | 35.0 GB kept for 1085-1091, 40.7 GB for all 8 epochs (about 4.9 GB per day of chain). The data folder on D: is 40 GB; about 1,040 GB stay free. |
+| Time | 11.3 h of download for 1085-1091 by the reports, plus about 0.3 h of 1091 that its report misses (below); 21.1 CPU hours. Clock time Nov 19 4:00 AM to Nov 21 12:21 AM, mostly waiting for 1091 to be published. |
+| Split | Whole UTC days Nov 12-19: training Nov 12-16, validation Nov 17, test Nov 18-19 (`config/evaluation.yaml`), as planned. Training has 30.7 h after the Nov 15 update. |
+| Tests | 326 pass, lint clean. |
+| Rebuild | `agent dataset` (labels rebuilt first): 367,730 coins, 1,470,920 rows (x 4 cutoffs), **1,464,896 to model on** (99.6%; 94.7% with one day). By split, rows to model on: training 214,092 coins (856,368 rows), validation 48,008 (192,032), test 104,124 (416,496). 37 min (labels 25 min), 2.7 GB of memory, a 178 MB file. Only counts were looked at, no outcomes of the held-out days. |
+
+| Epoch | Archive GB | Kept GB | Download h | CPU h | Chain h |
+|---|---|---|---|---|---|
+| 1084 (pilot) | 409.9 | 5.74 | 1.75 | 4.62 | 25.81 |
+| 1085 | 403.4 | 5.18 | 1.77 | 3.45 | 25.85 |
+| 1086 | 366.4 | 4.81 | 1.53 | 2.49 | 25.82 |
+| 1087 | 333.2 | 4.73 | 1.38 | 2.39 | 25.79 |
+| 1088 | 387.9 | 4.98 | 1.59 | 2.68 | 25.77 |
+| 1089 | 365.7 | 5.09 | 1.45 | 2.58 | 25.84 |
+| 1090 | 463.6 | 5.28 | 1.97 | 3.14 | 25.85 |
+| 1091 | 434.7 | 4.88 | 1.62 (about 1.9 in all) | 4.34 | 25.83 |
+| **1085-1091** | **2,755** | **35.0** | **11.3** | **21.1** | **180.8** |
+
+What happened:
+- **Nov 19, 4:00 AM to 1:41 PM:** epochs 1085-1090, one after another (9.7 h).
+- **Nov 19, 11:53 PM: the waiting command stopped.** While it checked every 10 minutes
+  for 1091, the archive once answered "429 Too Many Requests" (a rate limit), and the
+  command treated every answer other than "not found" as fatal. Nothing was lost. Fixed:
+  while waiting, temporary errors (HTTP 408, 425, 429 and 5xx, and network errors) mean
+  "try again in 10 minutes" too; any other error still stops it. With a test. Restarted
+  12:56 AM; it waited until the computer was turned off at about 6 AM.
+- **Epoch 1091** ended about 4:50 AM Nov 20 (checked on a public Solana node) and was
+  published by 2:49 PM. It was read in four sittings: 2:51-3:08 PM, 6:01-7:03 PM,
+  7:03-7:36 PM and 12:19-12:21 AM Nov 21. The first ended without a clean stop (the
+  computer or the app was closed), so it wrote no run record and its 0.3 h is not in the
+  report's time. The one file of a chunk left half done was moved to `_orphans`, as
+  designed, and the chunk was read again.
+
+Before the download:
+- **One command for all epochs:** `agent backfill --epoch 1085-1091 --wait` (ranges and
+  lists now work). One Ctrl+C stops every epoch left, with exit code 130; the same command
+  continues. It asks once for several epochs. `--status` and the summary now also print
+  the layout check (unknown events, events longer than the layout files). 4 new tests; 325
+  pass, lint clean.
+- **Trial read, epoch 1087 right after the update** (slots 469,811,025-469,811,664: 11
+  chunks, 0.55 GB, 8,721 bonding-curve trades, 29,824 PumpSwap trades): 0 unreadable,
+  0 undecodable, 0 unknown events. The extra bytes are as in epoch 1084: an 8-byte tail on
+  every trade event (non-zero 0.5% of the time on the curve vs 0.6% in 1084; 0.1-0.2% vs
+  0.1% on PumpSwap), none on any other event. The update did not change what we read.
+- **Download** started 4:00 AM PST Nov 19 in a terminal tab, with the pilot's settings
+  (8 workers, 100 MB/s limit).
+
+The plan, as written before the download. Checked on 2026-11-18 at about 9 PM PST (size-only requests; nothing downloaded):
+
+| Check | Result |
+|---|---|
+| Archive | Epochs up to 1089 are published (1089 ended about 1:15 AM Nov 18). 1090 ends about 3 AM Nov 19 and 1091 about 5 AM Nov 20; the archive publishes about 5 h after an epoch ends. Sizes 333-417 GB each. |
+| Disk | D: has 985 GB free; about 40 GB will be kept (5.3 GB per day of chain in the pilot). Only epoch 1084 is on disk now. |
+| Internet | Unlimited data (confirmed 2026-11-12, again by the user 2026-11-18). |
+| Resume | A stopped run continues where it left off (`progress.jsonl`); failed chunks go to the gap log and are retried by the next run. |
+| Program updates | **pump.fun and PumpSwap were both updated on Nov 15 at about 9:20 AM PST** (slot 469,811,025, epoch 1087; read from the chain). Our layout files are pump.fun's published copy of Oct 13, and pump.fun has published nothing newer. The parser counts events with more data than the layout files describe and keeps those extra bytes, so a short trial read shows whether anything changed. |
+
+**Which days.** Spec 15.3 says the most recent archived epochs. Two ways to read that:
+- **A. Start tonight:** 1085-1089 and, before 1084, 1083 and 1082. 2,612 GB, about 11.5 h,
+  done about 9 AM Nov 19. Whole UTC days Nov 10-17: training Nov 10-14, validation Nov 15,
+  test Nov 16-17. All training days are before the Nov 15 update and all test days after it.
+- **B. Newest days (recommended):** 1085-1091, right after 1084. 1085-1089 tonight (1,857 GB,
+  about 8 h); 1090 and 1091 start by themselves once published. Done about midday Nov 20.
+  Whole UTC days Nov 12-19: training Nov 12-16, validation Nov 17, test Nov 18-19. Training
+  includes about 1.3 days after the update, so the test does not judge models on a program
+  version they never saw.
+
+**Steps, after the user's OK:**
+1. **Trial read** of about 10 chunks (0.6 GB) right after the update in epoch 1087. Check
+   against epoch 1084: 0 undecodable events, 0 unknown events, and no new extra bytes (in
+   1084 every trade event carries the 8 bytes more than the published layout that Phase 1
+   found, stored in `extra_hex`; nothing else does). If anything changed,
+   stop, find the new layout (on-chain or current docs, rule 5), update the layout files,
+   run the tests, then continue. The trial's rows count toward the full run.
+2. **Download** one epoch after another in a terminal tab, with the pilot's settings (8
+   workers, 100 MB/s limit, about 63 MB/s). It can be stopped and continued any time.
+   First, a small change so one command covers all the epochs (`agent backfill` takes one
+   epoch now, and a stopped run exits as if it finished, so a loop of commands would go on
+   to the next epoch after Ctrl+C). With one command, one Ctrl+C stops everything, and
+   running it again continues; epochs not yet published are waited for. With a test.
+3. **Coverage:** every epoch's status and gap log; the backfill should be one unbroken span.
+4. **Rebuild** labels and the dataset (about 10 minutes), and run the tests.
+5. **Record** download size, disk use and time per epoch here.
+
+Not part of R4: looking at outcomes on the validation and test days. R4 only checks that
+the data is complete (rows and gaps per hour).
+
+## R3: exploration (research track, built 2026-11-14, closed 2026-11-14)
+
+**Done when:** "Notebook runs top to bottom from the dataset; findings in
+`docs/PROGRESS.md`." **Result: met; closed with the user's OK, 2026-11-14.**
+
+Built on branch `r1-labels`: `notebooks/r3_exploration.ipynb` (saved without outputs; the
+executed copy and an HTML page go to `<data folder>\notebooks\`), `config/evaluation.yaml`
+(spec 15.4 written down before any model) and `src/agent/models/evaluate.py` (the day
+split and intervals that resample whole launch hours).
+- **Held-out days:** exploration only uses rows before the validation and test days of
+  the evaluation plan. With one whole UTC day (Nov 12) nothing is held out yet; once R4
+  adds days, the newest are left out of the notebook automatically.
+- **Packages:** the user had pandas and Jupyter in WSL (another project), not in this
+  project's Windows `.venv`. Installed with the user's OK: 93 packages, 137 MB, all from
+  PyPI's file host (`files.pythonhosted.org`, no other pip source configured), pre-built
+  wheels only, each checked against its SHA-256; nothing already installed changed.
+  Listed in `pyproject.toml` (`research` extra) and, with hashes,
+  `requirements-research.txt`.
+
+| Check | Result |
+|---|---|
+| Notebook runs top to bottom | `jupyter nbconvert --execute` on the dataset: 13 code cells, no errors or warnings |
+| Tests | 321 pass (4 new: the plan file, whole days, the split, hour-resampled intervals); lint clean, now including the notebook |
+| Charts | Fixed colors per group (validated for color blindness as a set: worst pair 9.2, all checks pass), each chart with its numbers in a table |
+
+**Findings** (43,022 coins launched Nov 11 2:18 PM to Nov 12 about 3 PM PST; 95%
+intervals over launch hours; one day of one market, so none of this is general yet):
+1. **Most graduations happen before any decision time.** 60% of ordinary coins that
+   graduate within the hour (241 of 403) have already done so by T+30 s; 233 graduate in
+   the second they launch, with a median of 6 wallets buying the whole curve in the launch
+   block. "Will it graduate within the hour?" is already answered for them. Among coins
+   still on the curve, the share that graduates later is small: ordinary 1.06% (0.89 to
+   1.24) at T+30 s, falling to 0.42% at T+300 s; mayhem 1.54% to 0.64%; other quote 0.74%
+   to 0.46%. Mayhem coins almost never graduate at launch (1% by T+30 s). Target changed
+   (spec note below).
+2. **First-hour rates:** ordinary coins: dead 80.8% (77.1 to 83.8), rugged 3.5%,
+   bundled (stand-in) 4.7%, bad 83.6% (80.1 to 86.5), graduated 2.6%. Mayhem: dead 95.1%,
+   rugged 48.1%, graduated 1.6%. Other quote: dead 88.2%, graduated 1.0%.
+3. **Coins die fast:** median time of the last trade is 5 min for ordinary coins, 75 s
+   for mayhem, 60 s for other quote; 50% of ordinary coins trade after 5 min, 19% after
+   30 min.
+4. **"Not dead" is partly bots:** 17% of ordinary coins with a curve trade after 30 min
+   got such trades only from wallets that traded 20+ different coins late (63 wallets;
+   the busiest, 271 coins). A later choice: a "dead" that ignores those wallets.
+5. **One unusual hour:** of ordinary coins launched Nov 11 at 11 PM, only 46% were bad
+   (43% dead) against 64-92% in other hours; 217 of 394 still traded after 30 min, spread
+   over many wallets (the busiest touched 26). Not explained yet. Hours like this are why
+   intervals resample whole hours.
+6. **Creators repeat:** 17,705 creators; the 439 with 11+ coins made 47% of all coins (the
+   busiest, 459). Coins whose creator launched before are more often bad (82% with no
+   earlier launch, 91% with 5+) and less often graduate later (1.3% vs 0.0-0.8%) or
+   double (4.0% vs 1.6-1.8% from T+60 s); the same holds for coins with 12+ h of
+   backfill before them.
+7. **The curve's position is the strongest single signal** (curve progress, market cap,
+   net SOL and price change carry the same information). Graduating later at T+60 s: AUC
+   0.98, AP 0.49 (base rate 1.0%); among coins with 10+ trades, AUC 0.96, AP 0.52 (base
+   2.5%). Doubling at T+60 s: AUC 0.92, AP 0.30 (base 3.4%); among coins with 10+ trades
+   0.86 and 0.31 (base 6.5%). Bad: AUC 0.72 (lower values go with bad), AP 0.93 (base
+   83.6%). Signals above 0.95 were checked: they reflect curve position before the cutoff
+   (R2's no-lookahead tests), not a leak.
+8. **The rules are a weak baseline.** As a filter, "avoid" catches 25-40% of bad ordinary
+   coins while blocking 20-31% of fine ones; a flagged coin is bad 86-87% of the time
+   against 83.6% for any coin. "Avoid or caution" blocks 98% of fine coins from T+60 s.
+   As a picker, coins that pass at T+60 and T+120 s doubled 10.7% (5.8 to 16.0) and 10.6%
+   of the time against 3.4% and 2.7% for all (only 112 and 132 coins), but did not
+   graduate later more often. Whether that doubling lift holds is for the held-out days.
+
+**Spec notes** (added to spec 7 and 15.4 with change-log entry 25, user's OK, 2026-11-14):
+- **Graduation target (7, 15.4):** at each decision time, stage 2 predicts "graduates
+  later in the hour" for coins still on the bonding curve; coins already complete at the
+  decision time are counted and reported, not predicted.
+- **Evaluation plan (15.4):** written to `config/evaluation.yaml` on 2026-11-14 before any
+  model. "The most recent quarter of the days" rounds up; exploration and training use
+  only rows before the validation days.
+
+## R2: dataset (research track, built 2026-11-14)
+
+**Done when:** "No-lookahead test passes on the builder; one row per coin and cutoff;
+rebuilding gives identical output." **Result: met; closed 2026-11-14 with the user's OK.**
+
+Built on branch `r1-labels` (after R1): `src/agent/dataset/build.py` and `agent dataset`,
+which writes `<data folder>\dataset\dataset.parquet` and `manifest.json`.
+- **Rows:** every backfilled coin at T+30, 60, 120 and 300 s, in launch order.
+- **Columns (81):** 10 ids (mint, creator, quote coin, launch time, UTC date, launch hour,
+  cutoff, cutoff time, `history_s`, `has_gap`); 35 signals (the live engine's snapshot);
+  2 rules columns (verdict and reasons from `config/rules.yaml`); 34 label columns
+  (`labels_complete` and 33 named `label_...`: the coin's labels and the entry labels for
+  the same decision time).
+- **Signals from the backfill only:** `load_states` (the shared replay) gained a `roots`
+  choice. With the backfill only, the time the backfill does not cover counts as gaps,
+  worked out from its progress files the same way as for the labels
+  (`ingest/backfill_coverage.py`, moved out of the labels module). The live tools still
+  read both sources, as before.
+- **Labels kept current:** they are rebuilt first if missing, made with other settings,
+  or made from other backfill files (the label manifest now keeps a fingerprint of the
+  backfill's files).
+- **Manifest:** code version (git commit, whether there are uncommitted changes, and a
+  hash of the source files that decide the contents), rules hash, label settings hash,
+  epochs, backfill stretches, the column groups, and the file's SHA-256.
+- **Where the code lives:** spec 13 lists `features/build_snapshot.py`, but nothing under
+  `features` may import the labels (R1's test), so the builder is its own package; output
+  in `<data>\dataset\` rather than `data/features/`. Now a note in spec 13.
+
+| Check | Result |
+|---|---|
+| Tests | 317 pass (9 new), lint clean |
+| No-lookahead on the builder (test) | Events added after T+30/60/120/300 s (buys and sells by the creator, snipers, new wallets and the mayhem agent; the curve completing; new launches by the same creators) change no signal or rules column at or before that cutoff, and do change later ones. Deliberately leaking code (reading 10 s past the cutoff, or seeing a later curve completion) fails the test at T+30, 60 and 120 s; at T+300 s the builder does not load later events at all. |
+| No-lookahead on the real data | 400 random coins, 1,600 rows: signals rebuilt from events cut at the cutoff in SQL, before the feature code sees them, are identical in all 1,600 |
+| One row per coin and cutoff | 181,756 rows = 45,439 coins x 4; every coin has exactly 4; the same coins as the labels |
+| Rebuilding gives identical output | Built twice on epoch 1084: the same SHA-256 (`38d35f2b9ba7...`); also a test |
+| Labels on the right coin | 0 rows where the signals count more trades than the hour's label, the entry is not at cutoff + 5 s, the curve completed by the cutoff but the coin did not graduate in the hour, the dev bought more by the cutoff than in the hour, a SOL coin lacks entry labels, or another coin has them |
+| Live recording not read | Test: a buy that is only in `raw/` does not show up |
+| Run on epoch 1084 | About 1 minute when the labels are current (5.5 min when they are rebuilt first); 22 MB. 172,088 rows to model on (no gap, every label known: 43,022 coins x 4) |
+
+**The rules' verdicts** (rows to model on; avoid / caution / pass):
+
+| Coins | T+30 s | T+60 s | T+120 s | T+300 s |
+|---|---|---|---|---|
+| Ordinary | 24 / 41 / 35% | 28 / 72 / 0.7% | 33 / 66 / 0.9% | 39 / 61 / 0.8% |
+| Mayhem | 54 / 46 / 0% | 75 / 25 / 0% | 86 / 14 / 0% | 91 / 9 / 0% |
+| Priced in another coin | 10 / 90 / 0% | 13 / 87 / 0% | 14 / 86 / 0% | 17 / 83 / 0% |
+
+- Only ordinary coins can pass: mayhem coins and coins priced in another coin always get
+  a caution reason (by design). From T+60 s almost no coin passes, because "fewer than 10
+  buyers" starts at 60 s and fires for 32,001 of 43,022 coins. At later cutoffs the rules
+  are close to "avoid everything"; R3 scores them as the first baseline. How each verdict
+  turned out is left to R3.
+- `dev_prior_launches` only counts launches inside the backfill: coins have a median of
+  15.9 h of backfill before them (0 to 25.8 h; `history_s`). Even so, "dev launched 3+
+  coins before" fires for 20,843 coins at T+60 s. More days (R4) make this signal fairer.
+- SOL amounts are empty for coins priced in another coin (30% of rows).
+
+**Spec note:** added to spec 13 (the dataset builder is `src/agent/dataset/build.py` and
+writes to `data/dataset/`), with change-log entry 24 (user's OK, 2026-11-14).
+
+## R1: labels (research track, built 2026-11-13)
+
+**Done when:** "A test for each label on built examples; labels are computed apart from the
+features and never feed them; label rates per day, mayhem vs. ordinary, look plausible."
+**Result: met; closed 2026-11-14 with the user's OK.** With one day on disk there is one set of daily
+rates; comparing days comes with R4.
+
+Built on branch `r1-labels`: `config/labels.yaml` (every threshold),
+`src/agent/labels/make_labels.py`, and `agent labels`, which writes to
+`<data folder>\labels\`: `coins.parquet` (one row per coin), `entries.parquet` (one row per
+coin and decision time) and `manifest.json` (settings hash, backfilled stretches, counts).
+- **Source:** the backfill only, with trades in exact order (slot, position in the block,
+  event). Each coin's curve trades, its PumpSwap pool's trades and its post-complete buys,
+  up to 65 minutes after launch (the last entry at T+305 s plus one hour).
+- **Edges of the data:** the stretches the backfill covers come from its progress files;
+  a coin whose 65 minutes are not fully covered keeps a row with empty labels.
+
+**Choices beyond the spec's wording** (in `labels.yaml` or the module's notes; now a note in
+spec 7, "How the labels are computed"):
+1. **Prices are execution prices:** quote paid or received per token, before fees. They
+   mean the same on the curve and in the pool. Almost every graduated coin's pool is a
+   "boost" pool with a virtual quote reserve (99% of their trades), so reserve-based prices
+   would depend on that formula. For SOL-paired coins the first pool price is a median
+   1.01x the last curve price (0.62-1.16x for 90% of coins).
+2. **Price labels (rug, hit_2x) for SOL-paired coins only** (spec 5 models them first).
+   28% of launches and 200 of the 961 graduations are priced in another coin; across
+   graduation their units do not line up (32 coins jump more than 3x).
+3. **The mayhem agent's own trade prices are left out of price labels** (setting), and
+   hit_2x is also given with them. On mayhem coins a person trading right after the agent
+   pays 0.70-1.25x the previous price (10th-90th percentile); on ordinary coins
+   consecutive prices differ by 0.98-1.02x. The agent's trades still count as activity.
+4. **Trades under 0.001 SOL are not prices** (rounding noise).
+5. **The entry price includes the 1 SOL buy's price impact but not fees;** fees belong to
+   the backtest (R6).
+6. **`is_rug` uses the creator's wallet only;** `is_bundled_proxy` as in spec 7.
+
+| Check | Result |
+|---|---|
+| Tests | 308 pass (15 new: each label on built coins, coverage stretches, an end-to-end build from Parquet, the summary), lint clean |
+| Labels kept apart from features | Test: nothing under `features`, `daemon`, `models` or `tui` imports `agent.labels`, and `agent.labels` imports neither `features` nor `daemon`. The end-to-end test also shows labels never read the live recording. |
+| Run on epoch 1084 | 45,439 coins launched Nov 11 2:18 PM to Nov 12 4:06 PM PST; 43,022 with every label known (the rest launched in the last 65 minutes); 3.5 minutes |
+| Double counting | 274 post-complete buys; 110 of their transactions also hold PumpSwap trades, but in other pools (multi-hop swaps), so nothing is counted twice |
+| Same data, same files | Rows are saved in launch order; building twice on epoch 1084 gave byte-identical `coins.parquet` and `entries.parquet` (also a test) |
+
+**First hour, share of coins with every label known:**
+
+| Coins | Count | Dead | Rugged | Bundled (stand-in) | Bad | Graduated |
+|---|---|---|---|---|---|---|
+| Ordinary (SOL) | 15,466 | 81% | 3.5% | 4.7% | 84% | 2.6% |
+| Mayhem (SOL) | 14,826 | 95% | 48.1% | 0.0% | 98% | 1.6% |
+| Priced in another coin | 12,730 | 88% | - | 0.2% | - | 1.0% |
+
+"Dead" is the same to the percent without the mayhem agent's trades.
+
+**Reached 2x before 0.5x within an hour, after a 1 SOL buy 5 s after the decision time:**
+
+| Coins | T+30 s | T+60 s | T+120 s | T+300 s |
+|---|---|---|---|---|
+| Ordinary | 3.9% | 3.4% | 2.7% | 1.9% |
+| Mayhem | 9.5% | 5.0% | 2.5% | 0.8% |
+| Mayhem, with the agent's prices | 11.4% | 6.1% | 3.1% | 1.0% |
+
+**Why these look plausible, and what is odd:**
+- **Mayhem coins are a different market.** The median one trades for 75 seconds; in its
+  first hour it has 40 agent trades and 15 by people (medians). Creators sell at least
+  half their buy in 95% of them, and people's prices fall a median 83% from the peak. So
+  "rugged" at 48% mostly measures that collapse, not a classic creator rug. Reported
+  separately, as planned; the write-up should not compare mayhem and ordinary rug rates.
+- **Ordinary coins mostly fade rather than rug:** 41% launch without a creator buy; of the
+  creators who buy, 77% sell at least half within the hour, but only 5% of coins ever
+  fall 80% from a peak (most never rise).
+- **Bundled stand-in:** 68% of ordinary coins have at least one first-second buyer besides
+  the creator (median 2), and 4.7% have them holding 20% or more at T+60 s. Only 5.6% of
+  mayhem coins have any first-second buyer besides the agent.
+- **Holdings come from trades only:** one mayhem coin shows its early buyers at 126% of
+  supply (a volume-bot pattern: wallets buy, pass tokens on off the curve, others sell).
+  Left as measured and named as a limit; it is 1 coin of 45,439.
+- **hit_2x falls at later decision times** (fewer coins still moving); mayhem coins' higher
+  early rate reflects their price swings.
+
+**Spec note:** choices 1-6 above added to spec 7 as "How the labels are computed", with
+change-log entry 23 (user's OK, 2026-11-14). No threshold changed.
 
 ## Step B: engine always on (fast path, built 2026-11-12)
 

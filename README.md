@@ -180,11 +180,16 @@ the pump.fun and PumpSwap rows are kept (a few GB). Nothing else is written to d
 .venv\Scripts\agent backfill --epoch 1084                # shows the size, asks, then downloads
 .venv\Scripts\agent backfill --epoch 1084 --wait --yes   # waits for the epoch to be published
 .venv\Scripts\agent backfill --epoch 1084 --status       # what is done, sizes and speeds
+.venv\Scripts\agent backfill --epoch 1085-1091 --wait    # several epochs, one after another
 .venv\Scripts\agent parity --epoch 1084                  # compare with the live recording
 ```
 
 - Keep the window open while it runs (it does not run in the background like `agentd`).
-  Ctrl+C stops it; the same command continues where it stopped.
+  Ctrl+C stops it (every epoch left in the command); the same command continues where it
+  stopped.
+- With `--wait`, it checks every 10 minutes until the epoch is published, and it also
+  waits out short archive or network trouble (rate limits, server errors, dropped
+  connections) instead of stopping.
 - Speed limit and parallel downloads: `backfill:` in `config/settings.yaml`, or
   `--max-mb-s` and `--workers`. The default (80 MB/s) leaves room for the live recorder.
 - A piece that keeps failing is written to `backfill/gaps/` and tried again next run.
@@ -196,6 +201,65 @@ the pump.fun and PumpSwap rows are kept (a few GB). Nothing else is written to d
 backfill captured must be identical. It also counts what the recorder missed and asks
 the RPC about any row only the recorder has (those must be transactions that never
 landed on chain).
+
+## Labels (research track)
+
+```powershell
+.venv\Scripts\agent labels      # label every backfilled coin; prints rates and examples
+```
+
+What happened to each coin in its first hour (spec 7): dead, rugged, bundled (a stand-in),
+graduated, and whether a simulated 1 SOL buy 5 s after T+30/60/120/300 s saw the price
+double before it halved. Every threshold is in `config/labels.yaml`; change one and run
+the command again (about 3.5 minutes per day of history). Labels look into the future, so
+they are only for training and evaluating models, never inputs. They come from the
+backfill only, and coins launched in the last 65 minutes of the data get empty labels.
+
+## Dataset (research track)
+
+```powershell
+.venv\Scripts\agent dataset     # one row per coin and decision time; prints counts
+```
+
+Builds `dataset\dataset.parquet` in the data folder: one row per backfilled coin at
+T+30, 60, 120 and 300 s, with the signals the engine computes live (replayed on the
+backfill only), the verdict of the rules in `config/rules.yaml`, and the coin's labels.
+If the labels are missing or out of date (other settings in `labels.yaml`, or a changed
+backfill), it rebuilds them first. About 1 minute per day of history, plus the labels'
+time when they are rebuilt.
+
+- Columns starting with `label_` look into the future: never use them as inputs.
+- Use rows where `has_gap` is false (the backfill covers the coin up to the cutoff) and
+  `labels_complete` is true.
+- `manifest.json` next to it lists the column groups (ids, signals, rules, labels) and
+  what made the file: code version, rules and label settings, epochs, and a hash of the
+  file. The same data and code always give the same file.
+
+## Exploration notebook (research track)
+
+Needs the research packages once (pandas, matplotlib, scikit-learn, JupyterLab; about
+140 MB from PyPI):
+
+```powershell
+.venv\Scripts\pip install -e ".[research]"
+```
+
+`requirements-research.txt` lists the exact versions used, with their hashes. Then open
+the notebook and run it (Run > Run All):
+
+```powershell
+.venv\Scripts\jupyter lab notebooks\r3_exploration.ipynb
+```
+
+Or run it all without opening it, saving a page to read in the browser:
+
+```powershell
+.venv\Scripts\jupyter nbconvert --to html --execute notebooks\r3_exploration.ipynb --output-dir D:\memecoin-agent-data\notebooks
+```
+
+It reads the dataset (`agent dataset`) and leaves out the days the evaluation plan
+(`config/evaluation.yaml`, spec 15.4) holds back for testing models. Findings, with
+numbers, are in `docs/PROGRESS.md`.
 
 ## Where the data goes
 
@@ -209,6 +273,11 @@ gaps/gap-*.parquet                           every period when recording was off
 backfill/epoch-<E>/                          archive index, progress and report per epoch
 backfill/gaps/epoch-<E>.parquet              archive pieces that could not be read
 audits/audit-*.json                          audit results
+labels/coins.parquet, entries.parquet        labels (`agent labels`), with manifest.json
+dataset/dataset.parquet                      the research dataset (`agent dataset`), with
+                                             manifest.json
+notebooks/                                   notebooks run with their results, and pages
+duckdb_tmp/                                  DuckDB's overflow files, kept off drive C:
 run/                                         engine log, status, alerts, state files and
                                              the screen's copy-to-verdict times
 ```

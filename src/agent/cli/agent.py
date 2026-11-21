@@ -18,7 +18,13 @@ from agent.backfill_parity import ParityResult, rpc_check, run_parity
 from agent.config import load_config
 from agent.ingest.borsh_idl import Idl
 from agent.ingest.car import SlotIndex
-from agent.ingest.oldfaithful_backfill import Backfill, BackfillError, measurements
+from agent.ingest.oldfaithful_backfill import (
+    Backfill,
+    BackfillError,
+    measurements,
+    parse_epochs,
+    temporary_problem,
+)
 from agent.ingest.parsers import Parser
 from agent.ingest.rpc import Rpc, RpcError
 from agent.sim.chain_config import QuoteKinds, fetch_snapshot, load_snapshots, save_snapshot
@@ -285,33 +291,23 @@ def _print_measurements(m: dict) -> None:
     typer.echo(f"Rows:                   {rows or 'none'}")
     typer.echo(f"Problems:               {m['unreadable']:,} unreadable transactions, "
                f"{m['decode_errors']:,} undecodable events, {m['truncated']:,} cut-off logs")
+    typer.echo(f"Layout check:           {m['unknown_events']:,} unknown events, "
+               f"{m['stale_idl_events']:,} events longer than our layout files")
     per_day = m.get("per_chain_day")
     if per_day:
         typer.echo(f"Per day of chain time:  {per_day['downloaded_gb']:,.0f} GB downloaded, "
                    f"{per_day['kept_gb']:.2f} GB kept, {per_day['cpu_hours']:.1f} CPU hours")
 
 
-@app.command()
-def backfill(
-    epoch: Annotated[int, typer.Option(help="Old Faithful epoch to read.")],
-    from_slot: Annotated[int | None, typer.Option(help="Only chunks from this slot.")] = None,
-    to_slot: Annotated[int | None, typer.Option(help="Only chunks up to this slot.")] = None,
-    workers: Annotated[int | None, typer.Option(help="Parallel downloads.")] = None,
-    max_mb_s: Annotated[
-        float | None, typer.Option(help="Speed limit in MB/s for all downloads (0 = none).")
-    ] = None,
-    yes: Annotated[bool, typer.Option("--yes", help="Start without asking.")] = False,
-    status: Annotated[bool, typer.Option("--status", help="Only show what is done.")] = False,
-    wait: Annotated[
-        bool, typer.Option("--wait", help="If the epoch is not in the archive yet, check "
-                           "every 10 minutes and start when it is.")
-    ] = False,
-) -> None:
-    """Download one epoch of history from Old Faithful and keep the pump.fun rows.
+STOPPED_EXIT = 130  # stopped early (Ctrl+C, or the data drive almost full)
+WAIT_S = 600
 
-    Asks before downloading (an epoch is about 400 GB). Stop any time with Ctrl+C; run
-    the same command again to continue."""
-    cfg = load_config()
+
+def _backfill_epoch(cfg, epoch: int, *, from_slot: int | None, to_slot: int | None,
+                    workers: int | None, max_mb_s: float | None, status: bool, wait: bool,
+                    ask: bool) -> str:  # fmt: skip
+    """One epoch of `agent backfill`: 'done', 'failed' (chunks left in the gap log, tried
+    again next run) or 'stopped'."""
     bf = _backfill(cfg, epoch, workers, max_mb_s)
     while True:
         try:
@@ -319,7 +315,10 @@ def backfill(
                 index = bf.load_index(client)
                 problem = None if status else bf.car_problem(client, index)
         except (BackfillError, httpx.HTTPError) as exc:
-            problem = str(exc) if "not in the archive" in str(exc) else None
+            if "not in the archive" in str(exc):
+                problem = str(exc)
+            else:  # when waiting anyway, a rate limit or network hiccup is waited out too
+                problem = temporary_problem(exc) if wait else None
             if problem is None:
                 typer.echo(f"Could not read the epoch's slot index: {exc}")
                 raise typer.Exit(1) from None
@@ -329,11 +328,12 @@ def backfill(
             typer.echo(f"Epoch {epoch}: {problem}. Try later, or add --wait.")
             raise typer.Exit(1)
         typer.echo(f"{clock.clock(time.time())} epoch {epoch}: {problem}; checking again in "
-                   "10 minutes (Ctrl+C to give up).")  # fmt: skip
-        time.sleep(600)
+                   "10 minutes (Ctrl+C to stop).")  # fmt: skip
+        time.sleep(WAIT_S)
     if status:
+        typer.echo(f"Epoch {epoch}:")
         _print_measurements(measurements(bf, index))
-        return
+        return "done"
     pending = bf.pending(index, from_slot, to_slot)
     size = sum(c.size for c in pending)
     free = shutil.disk_usage(cfg.data_dir).free / 1e9
@@ -343,24 +343,88 @@ def backfill(
     if not pending:
         typer.echo("Nothing left to do in that range.")
         _print_measurements(measurements(bf, index))
-        return
+        return "done"
     limit = f"{bf.max_mb_s:g} MB/s" if bf.max_mb_s else "no limit"
     typer.echo(f"To do: {len(pending):,} chunks, {size / 1e9:,.1f} GB to download "
                f"({bf.workers} workers, speed limit {limit}).")  # fmt: skip
     typer.echo(f"Data drive: {free:,.1f} GB free. Only pump.fun rows are kept "
                "(a few GB per epoch).")  # fmt: skip
-    if not yes and not typer.confirm("Start the download?", default=False):
+    if ask and not typer.confirm("Start the download?", default=False):
         raise typer.Exit(1)
     totals = bf.run(pending)
     m = measurements(bf, index)
     report = bf.folder / "report.json"
     report.write_text(json.dumps(m, indent=1), encoding="utf-8")
     typer.echo("")
-    typer.echo("Stopped early; run the same command to continue." if totals.stopped
-               else "Finished.")  # fmt: skip
+    typer.echo(f"Epoch {epoch} stopped early." if totals.stopped
+               else f"Epoch {epoch} finished.")  # fmt: skip
     _print_measurements(m)
     typer.echo(f"Details saved to: {report}")
-    raise typer.Exit(1 if m["chunks_failed"] else 0)
+    if totals.stopped:
+        return "stopped"
+    return "failed" if m["chunks_failed"] else "done"
+
+
+@app.command()
+def backfill(
+    epoch: Annotated[str, typer.Option(
+        help="Old Faithful epoch to read, or several one after another: 1085-1091 or "
+             "1085,1087.")],  # fmt: skip
+    from_slot: Annotated[int | None, typer.Option(help="Only chunks from this slot.")] = None,
+    to_slot: Annotated[int | None, typer.Option(help="Only chunks up to this slot.")] = None,
+    workers: Annotated[int | None, typer.Option(help="Parallel downloads.")] = None,
+    max_mb_s: Annotated[
+        float | None, typer.Option(help="Speed limit in MB/s for all downloads (0 = none).")
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Start without asking.")] = False,
+    status: Annotated[bool, typer.Option("--status", help="Only show what is done.")] = False,
+    wait: Annotated[
+        bool, typer.Option("--wait", help="If an epoch is not in the archive yet, check "
+                           "every 10 minutes and start when it is.")
+    ] = False,
+) -> None:
+    """Download epochs of history from Old Faithful and keep the pump.fun rows.
+
+    Asks before downloading (an epoch is about 400 GB). Stop any time with Ctrl+C, which
+    stops every epoch in the command; run the same command again to continue."""
+    try:
+        epochs = parse_epochs(epoch)
+    except ValueError as exc:
+        typer.echo(f"--epoch: {exc}")
+        raise typer.Exit(2) from None
+    if len(epochs) > 1 and (from_slot is not None or to_slot is not None):
+        typer.echo("--from-slot and --to-slot work with a single epoch only.")
+        raise typer.Exit(2)
+    cfg = load_config()
+    ask = not (yes or status)
+    if ask and len(epochs) > 1:
+        typer.echo(f"Epochs {', '.join(map(str, epochs))}, one after another (about 400 GB "
+                   f"each, so about {len(epochs) * 0.4:.1f} TB). Stop any time with Ctrl+C; "
+                   "run the same command to continue.")  # fmt: skip
+        if not typer.confirm("Start the downloads?", default=False):
+            raise typer.Exit(1)
+        ask = False
+    failed = []
+    for e in epochs:
+        try:
+            outcome = _backfill_epoch(cfg, e, from_slot=from_slot, to_slot=to_slot,
+                                      workers=workers, max_mb_s=max_mb_s, status=status,
+                                      wait=wait, ask=ask)  # fmt: skip
+        except KeyboardInterrupt:
+            outcome = "stopped"
+        if outcome == "stopped":
+            left = epochs[epochs.index(e):]
+            typer.echo(f"\nStopped. Not finished: epoch {', '.join(map(str, left))}. "
+                       "Run the same command again to continue.")  # fmt: skip
+            raise typer.Exit(STOPPED_EXIT)
+        if outcome == "failed":
+            failed.append(e)
+    if len(epochs) > 1 and not status:
+        typer.echo(f"\nAll {len(epochs)} epochs read."
+                   + (f" Chunks failed in epoch {', '.join(map(str, failed))}: they are in "
+                      "the gap log; run the same command again to retry them." if failed
+                      else ""))  # fmt: skip
+    raise typer.Exit(1 if failed else 0)
 
 
 @app.command()
@@ -429,6 +493,143 @@ def parity(
     typer.echo(f"Details saved to: {saved}")
     typer.echo(f"Result: {'PASS' if result.passed else 'NOT PASSED'}")
     raise typer.Exit(0 if result.passed else 1)
+
+
+@app.command()
+def labels(
+    examples: Annotated[int, typer.Option(help="Show this many example coins per label.")] = 2,
+) -> None:
+    """Label every backfilled coin (spec 7; research track R1): dead, rugged, bundled
+    (stand-in), graduated, and doubled before halving after a simulated entry. Settings
+    in config/labels.yaml; results in <data folder>/labels/."""
+    import random
+
+    from agent.labels.make_labels import (
+        GROUPS,
+        build_labels,
+        group_of,
+        load_label_settings,
+        summarize,
+    )
+
+    cfg = load_config()
+    settings, sha = load_label_settings(cfg.root / "config" / "labels.yaml")
+    try:
+        run = build_labels(cfg.data_dir, settings, sha, progress=typer.echo)
+    except FileNotFoundError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from None
+    summary = summarize(run)
+    first, last = run.spans[0][0], run.spans[-1][1]
+    typer.echo("")
+    typer.echo(f"Backfill ({clock.zone()}): {_local(first)} to {_local(last)}"
+               f"{f' in {len(run.spans)} stretches' if len(run.spans) > 1 else ''}")  # fmt: skip
+    typer.echo(f"Coins: {summary['coins']:,}; with every label known: {summary['complete']:,} "
+               f"(the rest launched within {settings.horizon_s // 60} min of the end of the "
+               "data)")  # fmt: skip
+    typer.echo(f"Saved to {cfg.data_dir / 'labels'} in {run.seconds:.0f} s")
+    typer.echo("")
+    typer.echo("First hour, share of coins:")
+    typer.echo(f"  {'':12s}{'coins':>8s}{'dead':>7s}{'dead*':>7s}{'rugged':>8s}"
+               f"{'bundled':>9s}{'bad':>6s}{'graduated':>11s}")  # fmt: skip
+
+    def pct(value: float | None, digits: int = 0) -> str:
+        return "-" if value is None else f"{value:.{digits}%}"
+
+    for name in GROUPS:
+        g = summary["groups"][name]
+        r = g["rates"]
+        typer.echo(f"  {name:12s}{g['coins']:>8,}{pct(r['is_dead']):>7s}"
+                   f"{pct(r['is_dead_without_agent']):>7s}{pct(r['is_rug'], 1):>8s}"
+                   f"{pct(r['is_bundled_proxy'], 1):>9s}{pct(r['bad']):>6s}"
+                   f"{pct(r['graduated_1h'], 1):>11s}")  # fmt: skip
+    typer.echo("  (dead*: not counting the mayhem agent's trades; 'other quote': priced in "
+               "another coin, so no price labels)")  # fmt: skip
+    d = settings.double
+    typer.echo("")
+    typer.echo(f"Reached {d.up:g}x before {d.down:g}x within {d.within_s // 60} min, after a "
+               f"{d.buy_sol:g} SOL buy {d.entry_delay_s} s after each decision time:")  # fmt: skip
+    offsets = d.offsets_s
+    typer.echo(f"  {'':12s}" + "".join(f"{f'T+{o} s':>10s}" for o in offsets))
+    for name in ("ordinary", "mayhem"):
+        hits = summary["groups"][name]["hit_2x"]
+        typer.echo(f"  {name:12s}" + "".join(
+            f"{pct(hits[o]['rate'], 1) if o in hits else '-':>10s}" for o in offsets))  # fmt: skip
+        if name == "mayhem":
+            typer.echo(f"  {'  with agent':12s}" + "".join(
+                f"{pct(hits[o]['rate_with_agent_prices'], 1) if o in hits else '-':>10s}"
+                for o in offsets))  # fmt: skip
+    if examples:
+        typer.echo("")
+        typer.echo("Examples to check on Solscan (mint, group, launched):")
+        rng = random.Random(0)
+        complete = [c for c in run.coins if c["complete"]]
+        hit = {e["mint"] for e in run.entries if e["offset_s"] == offsets[0] and e["hit_2x"]}
+        for label, test in (("rugged", lambda c: c["is_rug"]),
+                            ("bundled", lambda c: c["is_bundled_proxy"]),
+                            ("graduated", lambda c: c["graduated_1h"]),
+                            (f"{d.up:g}x from T+{offsets[0]} s", lambda c: c["mint"] in hit),
+                            ("dead", lambda c: c["is_dead"])):  # fmt: skip
+            picked = [c for c in complete if test(c)]
+            for c in rng.sample(picked, min(examples, len(picked))):
+                typer.echo(f"  {label:16s}{c['mint']}  {group_of(c):11s} {_local(c['created_ts'])}")
+
+
+@app.command()
+def dataset() -> None:
+    """Build the research dataset (spec 15.3, R2): one row per backfilled coin and cutoff
+    (T+30/60/120/300 s) with its signals, the rules' verdict and its labels. Saved in
+    <data folder>/dataset/ with a manifest."""
+    import duckdb
+
+    from agent.dataset.build import build_dataset
+    from agent.models.rules import RulesError
+
+    cfg = load_config()
+    try:
+        run = build_dataset(cfg.root, cfg.data_dir, progress=typer.echo)
+    except (FileNotFoundError, ValueError, RulesError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from None
+    m = run.manifest
+    spans = m["backfill_spans"]
+    cols = m["columns"]
+    offsets = m["offsets_s"]
+    typer.echo("")
+    typer.echo(f"Backfill ({clock.zone()}): {_local(spans[0][0])} to {_local(spans[-1][1])}, "
+               f"epoch{'s' if len(m['epochs']) > 1 else ''} "
+               f"{', '.join(map(str, m['epochs']))}; signals from the backfill only")  # fmt: skip
+    typer.echo(f"Rows: {m['rows']:,} ({m['coins']:,} coins x {len(offsets)} cutoffs); "
+               f"columns: {len(cols['ids'])} ids, {len(cols['features'])} signals, "
+               f"{len(cols['rules'])} rules, {len(cols['labels'])} labels")  # fmt: skip
+    typer.echo(f"Rows to model on (no gap, every label known): {m['usable_rows']:,}")
+    typer.echo("")
+    with duckdb.connect() as db:
+        counts = db.execute(
+            "SELECT offset_s, rules_verdict, count(*) FROM read_parquet(?) "
+            "WHERE NOT has_gap AND labels_complete GROUP BY ALL", [run.path.as_posix()]
+        ).fetchall()  # fmt: skip
+    by_offset: dict[int, dict[str, int]] = {}
+    for offset, verdict, n in counts:
+        by_offset.setdefault(offset, {})[verdict] = n
+    typer.echo("Rules verdicts on those rows (config/rules.yaml):")
+    typer.echo(f"  {'':10s}{'rows':>9s}{'avoid':>8s}{'caution':>9s}{'pass':>7s}")
+    for offset in offsets:
+        got = by_offset.get(offset, {})
+        total = sum(got.values())
+        share = [f"{got.get(v, 0) / total:.0%}" if total else "-"
+                 for v in ("avoid", "caution", "pass")]  # fmt: skip
+        typer.echo(f"  {f'T+{offset} s':10s}{total:>9,}{share[0]:>8s}{share[1]:>9s}"
+                   f"{share[2]:>7s}")  # fmt: skip
+    code = m["code"]
+    commit = (code["git_commit"] or "unknown")[:7]
+    changes = " plus uncommitted changes" if code["uncommitted_changes"] else ""
+    typer.echo("")
+    typer.echo(f"Saved to {run.path} ({run.path.stat().st_size / 1e6:.0f} MB) in "
+               f"{m['seconds']:.0f} s{'; labels were rebuilt first' if run.labels_rebuilt else ''}")
+    typer.echo(f"Versions: code {commit}{changes} (source hash {code['source_sha']}), rules "
+               f"{m['rules_sha']}, label settings {m['labels_settings_sha']}; file hash "
+               f"{m['file_sha256'][:12]}")  # fmt: skip
 
 
 @app.command()

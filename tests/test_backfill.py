@@ -169,3 +169,20 @@ def test_waits_for_the_whole_archive_file(tmp_path):
     assert problem and "still being uploaded" in problem
     gone = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404)))
     assert bf.car_problem(gone, index) == "not in the archive yet"
+
+
+def test_epochs_can_be_given_as_a_range_or_a_list():
+    assert ob.parse_epochs("1084") == [1084]
+    assert ob.parse_epochs("1085-1091") == list(range(1085, 1092))
+    assert ob.parse_epochs("1085, 1087,1085,1086-1087") == [1085, 1087, 1086]
+    for bad in ("", "1091-1085", "abc", "1085-x"):
+        with pytest.raises(ValueError):
+            ob.parse_epochs(bad)
+
+
+def test_measurements_report_the_layout_check(tmp_path):
+    run_fixture_backfill(tmp_path)
+    m = ob.measurements(ob.Backfill(tmp_path, 1083, base_url="x"))
+    # The fixture slot is real (epoch 1083): its 42 trade events carry the 8 bytes more than
+    # pump.fun's published layout that Phase 1 found; nothing else is unknown.
+    assert m["unknown_events"] == 0 and m["stale_idl_events"] == 42

@@ -23,6 +23,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+# Research track (spec 15.3): notebooks, analysis and models. Exact versions with
+# hashes, as installed on Windows: requirements-research.txt.
+research = ["pandas>=2.2", "matplotlib>=3.9", "scikit-learn>=1.5", "jupyterlab>=4.2",
+            "nbconvert>=7.16", "ipykernel>=6.29"]
 
 [project.scripts]
 agentd = "agent.cli.agentd:app"

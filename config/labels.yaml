@@ -1,0 +1,37 @@
+# Labels: what happened to each coin after launch (spec 7; research track step R1).
+#
+# Labels look into the future. They are for training and evaluating models only, never
+# an input to features or rules. `agent labels` builds them from the backfill and writes
+# them to <data folder>/labels/. Times are seconds after the coin's launch (T).
+# Percentages are of total supply. Change a number here and run `agent labels` again.
+
+window_s: 3600                # every coin-level label looks at the coin's first hour
+
+dead:
+  quiet_after_s: 1800         # is_dead: no trades after T+30 min (to the end of the hour)
+
+rug:
+  creator_sold_share: 0.5     # is_rug: the creator sold at least half the tokens they bought
+  drawdown: 0.8               # and the price fell at least 80% from a peak
+
+bundle:                       # is_bundled_proxy (a stand-in, spec 7)
+  first_s: 1                  # wallets whose first buy came within 1 s of launch
+  at_s: 60                    # (block times are whole seconds), not the creator or the
+  hold_pct: 20                # mayhem agent, hold at least 20% of supply at T+60 s
+
+graduation:
+  within_s: 3600              # graduated_1h: the bonding curve completed within an hour
+
+double:                       # hit_2x, once per decision time (spec 6)
+  offsets_s: [30, 60, 120, 300]
+  entry_delay_s: 5            # bought this long after the decision time (spec 7 default)
+  buy_sol: 1.0                # with this budget, fees included (padre_presets.yaml buy_sol)
+  up: 2.0                     # hit_2x: a later price reaches 2x the entry price
+  down: 0.5                   # before one falls to 0.5x
+  within_s: 3600              # within an hour of the entry
+
+prices:
+  min_trade_sol: 0.001        # smaller trades are left out of prices (rounding noise)
+  mayhem_agent: exclude       # exclude | include: the mayhem agent's own trade prices.
+                              # Its trades still count as activity and still move the
+                              # price others pay; hit_2x is also given both ways.

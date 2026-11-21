@@ -4,6 +4,11 @@
 `TokenState`s; `snapshots` takes their signals at the spec's cutoffs. `outcomes` is the
 only function here that looks past a cutoff: it gives what happened to each token later,
 for checking rules and models, never as an input to them.
+
+By default the live recording (`raw/`) and the backfill (`raw_backfill/`) are both read,
+the recorder's copy of an event winning, and gaps come from the recorder's gap log. With
+`roots=BACKFILL_ONLY` (the research dataset; spec 4.1, research track) only the backfill
+is read, and the time it does not cover counts as gaps.
 """
 
 from __future__ import annotations
@@ -14,9 +19,12 @@ from pathlib import Path
 import duckdb
 
 from agent.features.token_state import SNAPSHOT_OFFSETS_S, CreatorIndex, TokenState
+from agent.ingest.backfill_coverage import backfill_gaps, backfill_spans
 from agent.ingest.gaps import overlap_seconds, read_gaps
 
-ROOTS = ("raw", "raw_backfill")
+RECORDED, BACKFILLED = "raw", "raw_backfill"
+ROOTS = (RECORDED, BACKFILLED)
+BACKFILL_ONLY = (BACKFILLED,)
 TRADE_COLUMNS = (
     "mint, slot, ts, signature, event_index, wallet, is_buy, quote_amount, token_amount, "
     "virtual_quote_reserves, virtual_token_reserves, real_quote_reserves, real_token_reserves"
@@ -44,19 +52,24 @@ class Replay:
         return overlap_seconds(self.gaps, start_ts, end_ts)
 
 
-def _tables(data_dir: Path, table: str) -> list[str]:
+def _tables(data_dir: Path, table: str, roots: tuple[str, ...]) -> list[str]:
     return [
         f"{(data_dir / root / table).as_posix()}/*/*.parquet"
-        for root in ROOTS
+        for root in roots
         if any((data_dir / root / table).glob("*/*.parquet"))
     ]
 
 
-def _scan(db: duckdb.DuckDBPyConnection, data_dir: Path, table: str, name: str) -> bool:
-    """A view over a table's recorded and backfilled files, one row per event."""
-    patterns = _tables(data_dir, table)
+def _scan(db: duckdb.DuckDBPyConnection, data_dir: Path, table: str, name: str,
+          roots: tuple[str, ...]) -> bool:  # fmt: skip
+    """A view over a table's files in `roots`, one row per event."""
+    patterns = _tables(data_dir, table, roots)
     if not patterns:
         return False
+    if len(roots) == 1:  # one source: `TokenState` already counts a repeated event once
+        db.execute(f"CREATE OR REPLACE TEMP VIEW {name} AS SELECT * FROM "
+                   f"read_parquet({patterns!r}, union_by_name=true)")  # fmt: skip
+        return True
     db.execute(
         f"CREATE OR REPLACE TEMP VIEW {name} AS SELECT * EXCLUDE (_n) FROM ("
         f"SELECT *, row_number() OVER (PARTITION BY signature, event_index ORDER BY source DESC) "
@@ -66,13 +79,17 @@ def _scan(db: duckdb.DuckDBPyConnection, data_dir: Path, table: str, name: str) 
 
 
 def load_states(data_dir: Path, start_ts: int, end_ts: int, *,
-                max_offset_s: int = max(SNAPSHOT_OFFSETS_S),
-                after_s: int = 0) -> Replay:  # fmt: skip
+                max_offset_s: int = max(SNAPSHOT_OFFSETS_S), after_s: int = 0,
+                roots: tuple[str, ...] = ROOTS) -> Replay:  # fmt: skip
     """Tokens created in [start_ts, end_ts) with their trades up to `max_offset_s` after
-    creation (plus `after_s` more, for `outcomes`)."""
+    creation (plus `after_s` more, for `outcomes`), read from `roots`."""
     db = duckdb.connect()
-    gaps = read_gaps(data_dir / "gaps")
-    if not _scan(db, data_dir, "tokens", "tokens"):
+    db.execute(f"SET temp_directory = '{(data_dir / 'duckdb_tmp').as_posix()}'")
+    if RECORDED in roots:
+        gaps = read_gaps(data_dir / "gaps")
+    else:
+        gaps = backfill_gaps(backfill_spans(data_dir))
+    if not _scan(db, data_dir, "tokens", "tokens", roots):
         return Replay([], CreatorIndex(), None, gaps)
     creators = CreatorIndex()
     for creator, ts, mint in db.execute(
@@ -86,7 +103,7 @@ def load_states(data_dir: Path, start_ts: int, end_ts: int, *,
     ))  # fmt: skip
     states = {row["mint"]: TokenState(row) for row in created}
     data_end = None
-    if states and _scan(db, data_dir, "trades", "trades"):
+    if states and _scan(db, data_dir, "trades", "trades", roots):
         db.execute("CREATE TEMP TABLE wanted AS SELECT mint, ts AS created FROM tokens "
                    "WHERE ts >= ? AND ts < ?", [start_ts, end_ts])  # fmt: skip
         horizon = max_offset_s + after_s
@@ -98,7 +115,7 @@ def load_states(data_dir: Path, start_ts: int, end_ts: int, *,
         for row in _dicts(rows):
             states[row["mint"]].add_trade(row)
         data_end = db.execute("SELECT max(ts) FROM trades").fetchall()[0][0]
-        if _scan(db, data_dir, "curve_completes", "completes"):
+        if _scan(db, data_dir, "curve_completes", "completes", roots):
             for row in db.execute(
                 "SELECT mint, ts FROM completes JOIN wanted USING (mint) "
                 "WHERE completes.ts <= wanted.created + ?", [horizon]

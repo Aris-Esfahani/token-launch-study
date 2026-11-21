@@ -241,6 +241,7 @@ All thresholds live in `config/labels.yaml`.
 
 **Stage 2: graduation**
 - `graduates_1h`: completes the bonding curve within 60 min of creation.
+- *(Added 2026-11-14, closing R3, research track; evidence in `docs/PROGRESS.md`, "R3: exploration")* **Predicted only for coins still on the curve.** Most coins that graduate within the hour have done so before the first decision time (in R3, 60% of ordinary ones by T+30 s, most in their launch second), so for them the outcome is already known. At each decision time stage 2 predicts "graduates later in the hour" (`graduates_1h`, with the curve not complete at the decision time: the dataset's `completed` signal is false) for coins still on the bonding curve. Coins already complete at the decision time are counted and reported, not predicted.
 
 **Stage 3: 2x before -50%**
 - Entry price = curve price at decision time **+ latency delay** (default 5s) **+ price impact of the position size**.
@@ -248,6 +249,15 @@ All thresholds live in `config/labels.yaml`.
 
 **Stage 4: filter-then-rank**
 - Not a new label. Score = P(not bad) × expected value from stages 2-3, after costs. Evaluate as a ranking per hour.
+
+**How the labels are computed** *(added 2026-11-14, closing R1, research track; evidence in `docs/PROGRESS.md`, "R1: labels")*
+1. **Prices are execution prices:** quote paid or received per token, before fees. They mean the same on the curve and in the PumpSwap pool. (Almost every graduated coin's pool has a virtual quote reserve, so prices from reserves would depend on that formula.)
+2. **Price-based labels (`is_rug`, `hit_2x`) cover SOL-paired coins only.** Coins priced in another coin get them empty: their units do not line up across graduation.
+3. **The mayhem agent's own trades are left out of the prices the labels use** (`prices.mayhem_agent` in `config/labels.yaml`); `hit_2x` is also stored with them included. Its trades still count as activity for `is_dead`.
+4. **Trades under 0.001 SOL are not used as prices** (setting): rounding noise.
+5. **The Stage 3 entry price includes the position's price impact but not fees.** On the curve the buy is simulated with the curve math. For a coin that graduated before the entry, the entry is the last traded price, without a simulated impact (the pool's reserves include a virtual part). Fees are applied in the backtest (10).
+6. **`is_rug` uses the creator's wallet only.** Finding linked wallets needs the same funding transfers as the bundle cluster, which the backfill does not keep.
+- Labels come from the backfill only. A coin whose first 65 minutes (the last entry at T+305 s plus one hour) are not fully covered keeps a row with empty labels.
 
 ---
 
@@ -455,6 +465,8 @@ memecoin-agent/
 
 Never commit `.env`, data, or anyone's keys.
 
+*(Added 2026-11-14, closing R2, research track.)* The research dataset (15.3, R2) is built by `src/agent/dataset/build.py` (`agent dataset`), not `features/build_snapshot.py`: nothing under `features` may import the labels (7), and the builder joins the two. It writes `data/dataset/` (`dataset.parquet` and `manifest.json`) rather than `data/features/`. The backfill's coverage, which the labels and the dataset both use, is in `ingest/backfill_coverage.py`.
+
 ---
 
 ## 14. Packaging and sharing
@@ -570,6 +582,7 @@ Written into `config/evaluation.yaml` before any model is scored on the test day
 - **Uncertainty:** 95% intervals by resampling whole hours (coins in the same hour are not independent).
 - **Reported separately:** mayhem vs. ordinary coins; each test day; with and without backfill-only features (4.1).
 - **Every result is reported,** including models that lose to the baselines.
+- *(Added 2026-11-14, closing R3.)* **Written down:** `config/evaluation.yaml` (2026-11-14, before any model), read by `src/agent/models/evaluate.py`. "The most recent quarter of the days" rounds up (9 whole days give 3 test days). Exploration (R3) and training use only rows launched before the validation days. With fewer than 4 whole days (2 test, 1 validation, 1 training) nothing is held out yet. Stage 2 is scored on coins still on the curve at each decision time (7).
 
 ---
 
@@ -587,6 +600,12 @@ Written into `config/evaluation.yaml` before any model is scored on the test day
 - **Adversarial drift:** ruggers and bundlers adapt. Retrain often and watch for drops.
 - **Free-tier limits:** cache aggressively; skip enrichment instead of crashing.
 - **pump.fun fee/curve/instruction changes:** versioned config and parsers, never hardcoded.
+  *(Added 2026-11-21, closing R4.)* **A program update inside the data:** pump.fun and
+  PumpSwap were both updated on Nov 15, 2026 at about 9:20 AM PST (slot 469,811,025). The
+  event layouts did not change (no unknown events and no new extra bytes across the
+  backfill), but trading behaviour or fees may have. Training has about 31 h after the
+  update; validation and test are entirely after it. The backtest (R6) uses fees read from
+  the chain for after the update.
 - **Padre changes:** irrelevant to the agent by design (no Padre dependency), but keep `padre_presets.yaml` in sync with the user's real settings.
 - High-risk market. Real money only after a sustained positive paper record, and only amounts the user can afford to lose.
 
@@ -669,3 +688,19 @@ Not used as training data: single Oct 2024 snapshot, aggregator-sourced (survivo
 20. **Evaluation (15.4):** a plan fixed in advance replaces the readiness criteria: time split with the test days scored once, base rate / rules / logistic regression baselines, set metrics, intervals by resampling whole hours, results reported separately for mayhem coins, test days, and with and without backfill-only features.
 21. **Data (4.1, 16):** training uses the backfill only; recorder data describes the live feed. Backfill-only fields may be features, with every model also reported without them.
 22. **Bundled label (7):** reported as a gap. The bundle cluster needs the early buyers' funding transfers, which the backfill does not keep, so `is_bundled_proxy` (other wallets' first-second buys holding ≥ 20% of supply at T+60s) stands in and is named as such. `is_dead` is reported with and without the mayhem agent's trades.
+
+**2026-11-14, closing R1** (approved by the user; evidence in `docs/PROGRESS.md`, "R1: labels"). Marked in place with "closing R1".
+
+23. **How labels are computed (7):** execution prices; price labels for SOL-paired coins only; the mayhem agent's trades left out of prices (`hit_2x` also stored with them); trades under 0.001 SOL not used as prices; the entry price includes impact on the curve but not fees; `is_rug` from the creator's wallet only; coins without 65 covered minutes get empty labels. No threshold changed.
+
+**2026-11-14, closing R2** (approved by the user; evidence in `docs/PROGRESS.md`, "R2: dataset"). Marked in place with "closing R2".
+
+24. **Repo layout (13):** the dataset builder is `src/agent/dataset/build.py` and writes `data/dataset/`, because the feature code must never import the labels. No requirement or "done when" check changed.
+
+**2026-11-14, closing R3** (approved by the user; evidence in `docs/PROGRESS.md`, "R3: exploration"). Marked in place with "closing R3".
+
+25. **Graduation target (7, 15.4):** stage 2 predicts graduating later in the hour, for coins still on the bonding curve at each decision time; coins that already graduated are counted and reported, not predicted. **Evaluation plan (15.4):** written to `config/evaluation.yaml`; the test quarter rounds up; exploration and training use only rows before the validation days. No threshold or "done when" check changed.
+
+**2026-11-21, closing R4** (approved by the user; evidence in `docs/PROGRESS.md`, "R4: more history"). Marked in place with "closing R4".
+
+26. **Program update (16):** pump.fun and PumpSwap were updated on Nov 15, 2026, inside the backfilled days. Event layouts unchanged; training has about 31 h after the update, validation and test none before it; the backtest uses fees read from the chain for after it. No threshold or "done when" check changed.
