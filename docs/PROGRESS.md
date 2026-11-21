@@ -150,8 +150,13 @@ needed to count the launches in it)`.
 2. **`agent check-live` no longer worked on this data folder.** It read the recording
    together with the backfill, and matching every recorded event against 35 GB of history
    runs out of memory. It now replays the recording only, which is what the engine saw
-   (20 minutes of coins in 11 s). `agent signals` reads both in the same way and has the
-   same problem; it is not changed here.
+   (20 minutes of coins in 11 s). `agent signals` read both in the same way. **Fixed
+   after the step closed (Nov 21, at the user's request):** it now replays the recording
+   only too, and counts each creator's earlier coins from everything on disk. On the real
+   data folder, 2 hours of coins (3,055) take 12.5 s. A token that only the backfill
+   holds is no longer judged, and the backfill no longer fills in events the recorder
+   missed; tokens touched by a recording gap were left out before and still are. One new
+   test (411 pass); the old code was not run again on the real folder to watch it fail.
 3. **About one coin in eight is not paired with SOL** in this morning's sample and gets
    no score (the models cover SOL-paired coins, spec 5).
 

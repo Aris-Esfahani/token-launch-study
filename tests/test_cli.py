@@ -217,6 +217,58 @@ def test_check_live_reports_a_difference(project):
     assert "different: 12" in result.output and "holders (12)" in result.output
 
 
+def test_signals_replays_the_recording_only_and_counts_launches_from_all_of_disk(project):
+    """`agent signals` judges the recorded tokens only (read together with the backfill it
+    runs out of memory on a real data folder), but a creator's earlier launches still
+    count when only the backfill holds them."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from agent.ingest.pipeline import Pipeline
+    from helpers import fixture_names, live
+
+    data = project / "data"
+    pipeline = Pipeline(data, data / "run")
+    for name in fixture_names():
+        if name.startswith("pump-"):
+            pipeline.handle(live(name))
+    pipeline.close()
+    (project / "config" / "rules.yaml").write_text(
+        'caution:\n  - feature: dev_prior_launches\n    at_least: 1\n'
+        '    reason: "dev launched {value:.0f} coins before"\n', encoding="utf-8")  # fmt: skip
+    coin = "DYZocfkvb85zbc3M7VcEJtva6H96HycPzmF49Cv1pump"  # recorded, created 1794482633
+    dev = "Dt6ANEGay7pGgbKrXxC5cPCS1XafR5v3q8LnM82ceLb3"
+
+    def run() -> str:
+        result = runner.invoke(agent_app, ["signals", "--hours", "1", "--at", "2"])
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    before = run()
+    assert "(0.0 h): 3; judged at 2 s after creation: 3 (0 more left out" in before
+    assert "pass          3 (100%)" in before and "coins before" not in before
+
+    folder = data / "raw_backfill" / "tokens" / "date=2026-11-12"
+    folder.mkdir(parents=True)
+    backfilled = [
+        # An earlier coin of the recorded coin's creator: counted.
+        {"signature": "S1", "event_index": 0, "source": "backfill", "mint": "EARLIER",
+         "creator": dev, "ts": 1794482633 - 5_000},
+        # A coin launched inside the replayed time that only the backfill holds: not judged.
+        {"signature": "S2", "event_index": 0, "source": "backfill", "mint": "BACKFILLONLY",
+         "creator": "SOMEONE", "ts": 1794482634},
+    ]  # fmt: skip
+    pq.write_table(pa.Table.from_pylist(backfilled), folder / "part-1.parquet")
+    after = run()
+    assert "(0.0 h): 3; judged at 2 s after creation: 3 (0 more left out" in after
+    assert "BACKFILLONLY" not in after
+    assert "caution       1 ( 33%)   most often: dev launched ... coins before (1)" in after
+    assert "pass          2 ( 67%)" in after
+    lines = after.splitlines()
+    at = next(n for n, line in enumerate(lines) if line.startswith(f"  {coin}"))
+    assert lines[at + 1].strip() == "dev launched 1 coins before"
+
+
 def test_alerts_shows_the_newest_alert_lines(project):
     files = RunFiles(project / "data" / "run")
     files.run_dir.mkdir(parents=True)

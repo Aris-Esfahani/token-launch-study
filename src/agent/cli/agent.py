@@ -749,13 +749,21 @@ def signals(
     show: Annotated[int, typer.Option(help="List this many of the newest tokens.")] = 15,
 ) -> None:
     """Replay recorded tokens through the live signals and the rules (config/rules.yaml),
-    and show the verdicts, plus how often tokens with each verdict died or graduated."""
+    and show the verdicts, plus how often tokens with each verdict died or graduated.
+    Only the live recording is replayed, not the backfilled history."""
     # Imported here so this command's code is not loaded by other commands (the backfill's
     # worker processes import this module).
     from collections import Counter
 
-    from agent.features.replay import OUTCOME_WINDOW_S, load_states, outcomes, snapshots
+    from agent.features.replay import (
+        OUTCOME_WINDOW_S,
+        RECORDED,
+        load_states,
+        outcomes,
+        snapshots,
+    )
     from agent.models.rules import LEVELS, PASS, RulesError, judge, load_rules
+    from agent.scoring.launch_context import load_launch_index
 
     cfg = load_config()
     try:
@@ -769,7 +777,12 @@ def signals(
         raise typer.Exit(1)
     end = int(span[1]) - at
     start = int(max(span[0], end - hours * 3600))
-    replay = load_states(cfg.data_dir, start, end, max_offset_s=at, after_s=OUTCOME_WINDOW_S)
+    # The recording only, as `agent check-live` reads it. (Read together with the backfill,
+    # every recorded event would first be matched against weeks of history, which runs out
+    # of memory.) Each creator's earlier launches are counted from everything on disk.
+    replay = load_states(cfg.data_dir, start, end, max_offset_s=at, after_s=OUTCOME_WINDOW_S,
+                         roots=(RECORDED,))  # fmt: skip
+    replay.creators = load_launch_index(cfg.data_dir, before_ts=end)
     rows = snapshots(replay, (at,))
     clean = [r for r in rows if not r["has_gap"]]
     try:

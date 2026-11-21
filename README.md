@@ -206,7 +206,8 @@ buys and sells, snipers, buy/sell flow, curve progress, mayhem share) and throug
 hand-written rules in `config/rules.yaml`, then shows each verdict (avoid / caution /
 pass, with reasons) and how often tokens with each verdict died or graduated. The rules
 are starting guesses to be tested, not advice. Signals only use events up to the moment
-they describe.
+they describe. Only the live recording is replayed, not the backfilled history; a
+creator's earlier coins are counted from both.
 
 ## History from the archive (backfill)
 
