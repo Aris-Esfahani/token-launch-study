@@ -467,6 +467,8 @@ Never commit `.env`, data, or anyone's keys.
 
 *(Added 2026-11-14, closing R2, research track.)* The research dataset (15.3, R2) is built by `src/agent/dataset/build.py` (`agent dataset`), not `features/build_snapshot.py`: nothing under `features` may import the labels (7), and the builder joins the two. It writes `data/dataset/` (`dataset.parquet` and `manifest.json`) rather than `data/features/`. The backfill's coverage, which the labels and the dataset both use, is in `ingest/backfill_coverage.py`.
 
+*(Added 2026-11-21, R5, research track.)* The models (15.3, R5) are in `models/`: `frame.py` (the rows and columns a model may read), `train.py` (baselines, logistic regression, LightGBM, the checks, `agent train` and `agent score-test`), `evaluate.py` (the plan, the split and the metrics) and `report.py` (writes `docs/R5_RESULTS.md`). There is no separate `calibrate.py` or `registry.py`: calibration is part of `train.py`, and the model files with their manifest go to `data/models/r5/`. Backfill-only signals are in `features/backfill_only.py`.
+
 ---
 
 ## 14. Packaging and sharing
@@ -583,6 +585,14 @@ Written into `config/evaluation.yaml` before any model is scored on the test day
 - **Reported separately:** mayhem vs. ordinary coins; each test day; with and without backfill-only features (4.1).
 - **Every result is reported,** including models that lose to the baselines.
 - *(Added 2026-11-14, closing R3.)* **Written down:** `config/evaluation.yaml` (2026-11-14, before any model), read by `src/agent/models/evaluate.py`. "The most recent quarter of the days" rounds up (9 whole days give 3 test days). Exploration (R3) and training use only rows launched before the validation days. With fewer than 4 whole days (2 test, 1 validation, 1 training) nothing is held out yet. Stage 2 is scored on coins still on the curve at each decision time (7).
+- *(Added 2026-11-21, start of R5; decided by the user after the leak review and before any model was trained; evidence in `docs/PROGRESS.md`, "R5: models".)* **Tightened for the models:**
+  - **Whole days only.** Models train on Nov 12-16, tune on Nov 17 and are tested on Nov 18-19 (UTC). The part-days at the edges of the backfill (Nov 11, Nov 20) are in no set.
+  - **No label reads into a later set.** Labels look up to 65 min past launch (3,905 s). Coins launched that close before the validation or the test days are left out of the set they are in (`split.drop_label_overlap_s` in `config/evaluation.yaml`).
+  - **Creator history over a fixed window.** Models read `dev_launches_24h` (the creator's launches in the 24 hours before the coin) instead of `dev_prior_launches`, which counts since the backfill began and so grows with the calendar. The dataset keeps the old column.
+  - **Stage 1 is reported on two targets:** `bad` as defined in 7 (the main result), and `dead or rug` alone, because the bundled stand-in is already decided at T+60 s (one signal matches it 98.7-99.7% of the time from then on).
+  - **Models cover SOL-paired coins** (5); coins priced in another coin are counted, not modeled.
+  - **Backfill-only features (4.1)** are the priority fee, block position and compute units of the launch and of the buys so far (`features/backfill_only.py`; Jito tips are not stored). The models without them are the main results.
+  - **Scored once, enforced:** `agent score-test` refuses to run when a test report exists, and `agent train` refuses to replace models the test days were scored with.
 
 ---
 
@@ -704,3 +714,7 @@ Not used as training data: single Oct 2024 snapshot, aggregator-sourced (survivo
 **2026-11-21, closing R4** (approved by the user; evidence in `docs/PROGRESS.md`, "R4: more history"). Marked in place with "closing R4".
 
 26. **Program update (16):** pump.fun and PumpSwap were updated on Nov 15, 2026, inside the backfilled days. Event layouts unchanged; training has about 31 h after the update, validation and test none before it; the backtest uses fees read from the chain for after it. No threshold or "done when" check changed.
+
+**2026-11-21, start of R5** (decided by the user after the leak review, before any model was trained; evidence in `docs/PROGRESS.md`, "R5: models"). Marked in place with "start of R5" or "R5".
+
+27. **Evaluation plan tightened (15.4):** models use whole days only; coins launched within 65 min before the validation or the test days are left out, so no label reads into a later set; `dev_launches_24h` replaces `dev_prior_launches` in the models; stage 1 is also reported as dead or rug alone; SOL-paired coins are modeled; the backfill-only features are named; scoring the test days once is enforced by the commands. **Repo layout (13):** the model code's files. No threshold or "done when" check changed.

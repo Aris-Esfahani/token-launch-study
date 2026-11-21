@@ -23,7 +23,7 @@ Training data is the backfill; the live tools built so far stay as a demo.
 | R2. Dataset | Done 2026-11-14 (user OK'd; branch `r1-labels`) | `agent dataset`: 181,756 rows (45,439 coins x 4 cutoffs), 172,088 to model on; rebuilt byte-identical. Results in "R2" below. |
 | R3. Exploration | Done 2026-11-14 (user OK'd; branch `r1-labels`) | `notebooks/r3_exploration.ipynb` runs top to bottom on the dataset. Main finding: most graduations happen before the first decision time, so stage 2 now predicts graduating later, for coins still on the curve (spec 7). Results in "R3" below. |
 | R4. More history | Done 2026-11-21 (user OK'd; option B; branch `r1-labels`) | Epochs 1085-1091: 2,755 GB downloaded in 11.3 h, 35 GB kept; one unbroken span of 206.6 h with no gaps. Dataset rebuilt: 367,730 coins, 1,464,896 rows to model on. Results in "R4" below. |
-| R5. Models | Not started | Evaluation plan in spec 15.4, written to `config/evaluation.yaml` before any test-day scores. |
+| R5. Models | Done 2026-11-21 (user OK'd; branch `r5-models`) | Leak review, baselines and LightGBM for stages 1-3; test days Nov 18-19 scored once. LightGBM beats every baseline in every stage; the backfill-only signals add nothing. Results in "R5" below and `docs/R5_RESULTS.md`. |
 | R6. Backtest (analysis) | Not started | |
 | R7. Write-up | Not started | |
 
@@ -38,6 +38,170 @@ verdict, D screen, E paper ledger; the full backfill (Phase 4) runs in the backg
 | C. Live signals + rules verdict | **Built 2026-11-12 (branch `step-b`)** | The engine judges every new token at T+30/60/120/300 s; `agent check-live` compares live with replay. The same feature code builds the research dataset (R2). Results in "Step C" below. |
 | D. Screen | **Built 2026-11-12 (branch `step-b`); kept as a demo** | `agent screen`: alert feed, paste box, clipboard watcher, status bar; the engine answers over a local connection. Results in "Step D" below. |
 | E. Paper ledger | Paused 2026-11-13 (research track) | `padre_presets.yaml` is kept as settings for the R6 backtest. |
+
+## R5: models (research track, built and closed 2026-11-21)
+
+**Done when:** "The 15.4 report, with the test days scored once; SHAP and leakage
+checks." **Result: met in every part; closed 2026-11-21 with the user's OK.** Every number of
+the report (all stages, models, decision times, ordinary / mayhem, each test day, with
+intervals) is in [R5_RESULTS.md](R5_RESULTS.md); the tables here are the main ones.
+
+Built on branch `r5-models`:
+- `src/agent/models/evaluate.py`: the model split (whole days, labels that reach a later
+  set left out) and the plan's metrics with intervals that resample whole launch hours.
+- `src/agent/models/frame.py`: the rows and columns a model may read (never an id, a rules
+  column or a label; a test checks), and three signals known at launch.
+- `src/agent/features/backfill_only.py`: six backfill-only signals (priority fee, block
+  position, compute units of the launch and of the buys so far), with a no-lookahead test.
+- `src/agent/models/train.py`, `report.py`: baselines, logistic regression, LightGBM,
+  the checks, and the results file. Commands: `agent train` and `agent score-test`.
+- LightGBM 4.7.0 installed with the user's OK (one 1.36 MB file from PyPI's file host,
+  checked against its SHA-256; in `pyproject.toml` and `requirements-research.txt`).
+- Tests: 348 pass (22 new), lint clean.
+
+### Step 1: leak review, before any model (reported to the user first)
+
+**No lookahead leak in the labels, features or dataset builder.**
+
+| Check | Result |
+|---|---|
+| Code read | Every signal reads events with `ts <= cutoff` only; the creator count uses launches strictly before the coin's own; labels are only ever joined as `label_...` columns. |
+| Tests | All 326 passed before any change, including the builder's no-lookahead tests. |
+| Real data | 300 random training coins (1,200 rows): signals rebuilt from raw events cut at the cutoff match the dataset in every value. |
+| One signal at a time | No signal scores above 0.92 AUC on any target on the training days. |
+| Same code | The dataset's recorded code hash differs from today's files only by line endings (it was built in the other working folder). |
+
+Four things that are not lookahead but would bias results, with the user's decisions
+(2026-11-21, before any model was trained; spec 15.4 and change-log entry 27):
+1. **Labels reach across the split boundaries** (65 min ahead): 2,470 training coins had
+   labels reading Nov 17, 2,216 validation coins reading Nov 18. **Left out.**
+2. **`dev_prior_launches` grows with the calendar** (mean 32 on Nov 12, 120 on Nov 15).
+   **Models read `dev_launches_24h` instead** (a 24-hour window; Nov 12 has 2-24 h of
+   history).
+3. **The bundled stand-in is already decided at T+60 s** (`sniper_hold_pct >= 20` matches
+   it 98.7-99.7% of the time; 0.9% of ordinary coins are bad only because of it).
+   **Stage 1 is reported both as `bad` and as dead or rug alone.**
+4. **Part-days:** `DaySplit.role` puts the Nov 11 part-day in training and the Nov 20
+   part-day in test (R4's counts of 214,092 and 104,124 coins include them). **Models use
+   whole days only** (`DaySplit.model_role`).
+
+### What was trained
+
+- **Rows:** SOL-paired coins (ordinary and mayhem), no gap, every label known. Training
+  Nov 12-16: 165,664 coins (662,656 rows); validation Nov 17: 37,999 coins; test
+  Nov 18-19: 65,865 coins (263,460 rows). No coin is in two sets.
+- **Features:** 36 (33 dataset signals, `dev_launches_24h`, `launches_last_hour`,
+  `launch_hour_utc`), plus 6 backfill-only ones for the "+ backfill-only" models.
+- **Models, one per stage with the token's age as a feature:** base rate; the rules'
+  verdict; logistic regression; LightGBM (8 settings tried on the validation day, early
+  stopping on it); both fitted models again with the backfill-only signals.
+  Probabilities calibrated on the validation day (isotonic).
+- **Chosen on Nov 17:** logistic C 0.01; LightGBM 63 leaves (15 for graduation), at least
+  100 rows per leaf, no class weights (tried, as spec 9 asks; never better), 48-258 rounds.
+- **Time:** 8.3 minutes to train and check everything; 9 minutes to score the test days.
+  Training twice gave an identical validation report.
+
+### Test days Nov 18-19, scored once (2:09 AM PST, Nov 21)
+
+Numbers in brackets are 95% intervals from resampling whole launch hours.
+
+**Stage 1, bad (rug, dead or bundled): bad coins caught when blocking at most 30% of fine
+ones.** 93.3% of coins are bad, so PR-AUC is high for everything (base rate 0.933, rules
+0.949-0.957, logistic 0.985-0.988, LightGBM 0.988-0.993); this metric says more.
+
+| Model | T+30 s | T+60 s | T+120 s | T+300 s |
+|---|---|---|---|---|
+| Base rate | 0 | 0 | 0 | 0 |
+| Rules | 0.457 (0.439 to 0.473) | 0.594 (0.564 to 0.613) | 0 (0 to 0.665) | 0 |
+| Logistic regression | 0.825 (0.812 to 0.835) | 0.839 (0.829 to 0.850) | 0.859 (0.848 to 0.868) | 0.882 (0.872 to 0.891) |
+| LightGBM | 0.843 (0.829 to 0.855) | 0.868 (0.856 to 0.877) | 0.882 (0.872 to 0.891) | 0.901 (0.892 to 0.909) |
+| LightGBM + backfill-only | 0.844 (0.832 to 0.854) | 0.862 (0.852 to 0.872) | 0.876 (0.867 to 0.888) | 0.897 (0.888 to 0.908) |
+
+- The rules give three levels only; where "avoid" alone already blocks more than 30% of
+  fine coins they catch nothing within the limit (0).
+- Ordinary coins only (87.2% bad): LightGBM 0.720, 0.762, 0.797, 0.839; logistic 0.682 to
+  0.794; rules 0.30-0.39 at best. Mayhem coins (98.5% bad): LightGBM 0.679 to 0.906.
+- Without the bundled stand-in (dead or rug): LightGBM 0.854, 0.870, 0.887, 0.907; the
+  already-known part of the target changes little.
+- The practical track's reference (catch 90% while blocking 30%) is reached only at
+  T+300 s on all coins, and not on ordinary coins alone.
+
+**Stage 2, graduates later in the hour (coins still on the curve; 0.5-1.5% do).**
+
+| Model | Metric | T+30 s | T+60 s | T+120 s | T+300 s |
+|---|---|---|---|---|---|
+| Base rate | PR-AUC | 0.014 | 0.014 | 0.011 | 0.005 |
+| Rules | PR-AUC | 0.014 | 0.013 | 0.010 | 0.005 |
+| Logistic regression | PR-AUC | 0.150 (0.124 to 0.178) | 0.212 (0.183 to 0.245) | 0.275 (0.239 to 0.314) | 0.218 (0.179 to 0.269) |
+| LightGBM | PR-AUC | 0.193 (0.156 to 0.230) | 0.246 (0.212 to 0.281) | 0.313 (0.272 to 0.358) | 0.263 (0.222 to 0.317) |
+| LightGBM + backfill-only | PR-AUC | 0.193 (0.156 to 0.230) | 0.247 (0.215 to 0.279) | 0.323 (0.281 to 0.368) | 0.269 (0.226 to 0.325) |
+| Rules | Top 5 per hour | 0.000 | 0.007 | 0.002 | 0.001 |
+| Logistic regression | Top 5 per hour | 0.271 (0.200 to 0.342) | 0.383 (0.317 to 0.458) | 0.404 (0.338 to 0.479) | 0.304 (0.246 to 0.362) |
+| LightGBM | Top 5 per hour | 0.383 (0.321 to 0.450) | 0.417 (0.350 to 0.483) | 0.479 (0.412 to 0.550) | 0.350 (0.287 to 0.417) |
+| LightGBM | Top 20 per hour | 0.244 (0.206 to 0.281) | 0.278 (0.241 to 0.316) | 0.301 (0.261 to 0.341) | 0.207 (0.183 to 0.232) |
+| Base rate | Brier | 0.0143 | 0.0133 | 0.0106 | 0.0048 |
+| LightGBM | Brier | 0.0129 | 0.0115 | 0.0086 | 0.0041 |
+
+**Stage 3, 2x before 0.5x after a 1 SOL buy 5 s later (6.3% at T+30 s to 1.0% at T+300 s).**
+
+| Model | Metric | T+30 s | T+60 s | T+120 s | T+300 s |
+|---|---|---|---|---|---|
+| Base rate | PR-AUC | 0.063 | 0.036 | 0.019 | 0.010 |
+| Rules | PR-AUC | 0.065 | 0.038 | 0.021 | 0.011 |
+| Logistic regression | PR-AUC | 0.184 (0.176 to 0.194) | 0.188 (0.175 to 0.203) | 0.193 (0.173 to 0.218) | 0.186 (0.162 to 0.217) |
+| LightGBM | PR-AUC | 0.208 (0.199 to 0.217) | 0.218 (0.203 to 0.235) | 0.221 (0.196 to 0.250) | 0.204 (0.182 to 0.228) |
+| LightGBM + backfill-only | PR-AUC | 0.208 (0.200 to 0.218) | 0.218 (0.203 to 0.236) | 0.219 (0.195 to 0.248) | 0.198 (0.177 to 0.221) |
+| Rules | Top 5 per hour | 0.008 | 0.065 | 0.046 | 0.042 |
+| Logistic regression | Top 5 per hour | 0.212 (0.158 to 0.271) | 0.275 (0.221 to 0.333) | 0.350 (0.292 to 0.412) | 0.329 (0.275 to 0.383) |
+| LightGBM | Top 5 per hour | 0.269 (0.215 to 0.323) | 0.366 (0.290 to 0.447) | 0.377 (0.308 to 0.448) | 0.321 (0.271 to 0.375) |
+| LightGBM | Top 20 per hour | 0.269 (0.242 to 0.295) | 0.301 (0.274 to 0.327) | 0.261 (0.230 to 0.292) | 0.242 (0.219 to 0.267) |
+| Base rate | Brier | 0.0592 | 0.0346 | 0.0187 | 0.0100 |
+| LightGBM | Brier | 0.0534 | 0.0305 | 0.0162 | 0.0087 |
+
+**Reported separately (15.4):**
+- **Mayhem vs ordinary:** the models rank ordinary coins better. Stage 3 PR-AUC at
+  T+60 s: ordinary 0.275 (base 0.024), mayhem 0.180 (base 0.046). Stage 2 at T+60 s:
+  ordinary 0.412 (base 0.011), mayhem 0.130 (base 0.016). On mayhem coins the rules beat
+  the base rate a little (stage 3: 0.125 vs 0.093 at T+30 s) and the models beat the rules.
+- **Each test day:** the two days agree. LightGBM stage 3 PR-AUC at T+60 s: 0.217 on
+  Nov 18, 0.218 on Nov 19; stage 2: 0.215 and 0.283; stage 1 caught at 30%: 0.867 and 0.868.
+- **With and without backfill-only signals:** no difference beyond the intervals in any
+  stage. A live tool loses nothing by not having them.
+- **Calibration (LightGBM, test days):** predicted and observed rates agree in every
+  group, e.g. stage 3 at T+60 s: 0.2% → 0.2%, 0.9% → 1.0%, 2.8% → 2.8%, 9.1% → 9.8%,
+  19.6% → 19.7%; stage 2 at T+60 s: 0.5% → 0.6%, 1.7% → 1.8%, 9.7% → 10.0%.
+- **Every result is reported,** including the losers: the rules do not beat the base rate
+  in stages 2-3 on ordinary coins, and their top picks at T+30 s are worse than chance.
+
+### SHAP and leakage checks (on the validation day, before the test days were scored)
+
+| Check | Result |
+|---|---|
+| SHAP, top features | Stage 1: `is_mayhem` 20%, `net_sol` 12%, `market_cap_sol` 12%, `curve_progress_pct` 8%. Stage 2: `net_sol` 14%, `buys_last_30s` 13%, `is_mayhem` 8%. Stage 3: `buys_last_30s` 24%, `net_sol` 21%. All are activity before the cutoff; no single feature dominates and none is suspicious. |
+| Shuffled labels (5 times per stage) | ROC-AUC 0.35-0.59 against 0.88-0.94 for the real models; PR-AUC at the base rate for stage 1 (0.894 vs 0.896), 0.017 vs 0.011 for stage 2 and 0.044 vs 0.034 for stage 3, against 0.28 and 0.22 for the real models. See the note below. |
+| Walk-forward inside training | The same order on every day: LightGBM > logistic > rules ≈ base rate. Stage 3 PR-AUC 0.196-0.218, stage 2 0.237-0.328, stage 1 0.980-0.989. Validation (0.22, 0.28, 0.98) and test (0.20-0.22, 0.19-0.31, 0.99) are in the same range: nothing collapsed on unseen days. |
+| Sets kept apart | 0 coins in two sets; test rows are not read by `agent train` at all. |
+| Features | A test refuses any id, rules column, target or `label_` column as a feature. |
+| Scored once | `agent score-test` refuses when a test report exists; `agent train` refuses to replace the scored models; scoring checks the model files against the manifest. |
+
+Note on the shuffled labels (my reading): the shuffled models are not exactly at chance,
+but they land on both sides of it (stage 2 below 0.5, stage 3 above), far from the real
+models. A model fitted to noise still gives active coins more varied scores than quiet
+ones, and active coins hold most of the positives, so its ranking is not independent of
+the outcome. A leak would instead keep the shuffled score close to the real one.
+
+### Limits
+
+- **Two test days, one market,** both after the Nov 15 program update. The intervals
+  only cover hour-to-hour variation inside these days.
+- **Stage 1 is mostly easy:** 93% of coins are bad and 98.5% of mayhem coins. The share
+  caught at 30% blocked is the number to read, on ordinary coins.
+- **Precision is not profit.** A top-5 pick doubling 37% of the time says nothing yet
+  about fees, price impact or what the other 63% lose: that is R6.
+- **One model for ordinary and mayhem coins** (with `is_mayhem` as a feature). A separate
+  mayhem model (spec 8.10) was not tried.
+- **No calibration chart yet** (the curve is given as numbers); a figure belongs in R7.
+- `dev_launches_24h` is short on Nov 12 (the backfill starts 1.7 h before it).
 
 ## R4: more history (research track; plan 2026-11-18, downloaded 2026-11-19 to 2026-11-21, closed 2026-11-21)
 

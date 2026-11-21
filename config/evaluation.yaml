@@ -12,6 +12,13 @@ split:
   # With fewer whole days than test + validation + this, nothing is held out yet.
   min_train_days: 1
   # Exploration (R3) and training use only what comes before the validation days.
+  # (Added 2026-11-21 at the start of R5, before any model was trained; user's decision.
+  # It tightens the plan.) Labels look up to 65 min past launch (config/labels.yaml: the
+  # last entry at T+305 s plus one hour). Models leave out coins launched that close
+  # before the validation or the test days, so no label used for training or tuning reads
+  # a later set's minutes. Models also use whole days only: the part-days at the edges
+  # of the backfill are in no set.
+  drop_label_overlap_s: 3905
 
 # Every model is compared with these (15.4).
 baselines:

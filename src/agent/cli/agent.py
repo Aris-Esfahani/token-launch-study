@@ -633,6 +633,63 @@ def dataset() -> None:
 
 
 @app.command()
+def train() -> None:
+    """Fit the baselines and models of research step R5 (spec 15.3, 15.4) on the training
+    days, tune them on the validation day, run the checks (SHAP, shuffled labels,
+    walk-forward) and save everything in <data folder>/models/r5/. The test days are not
+    read. Results go to docs/R5_RESULTS.md."""
+    from agent.models.evaluate import load_plan
+    from agent.models.report import MODEL_NAMES, write_results
+    from agent.models.train import AlreadyScored
+    from agent.models.train import train as fit
+
+    cfg = load_config()
+    plan, sha = load_plan(cfg.root / "config" / "evaluation.yaml")
+    try:
+        run = fit(cfg.root, cfg.data_dir, plan, sha, progress=typer.echo)
+    except (AlreadyScored, FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from None
+    m = run["manifest"]
+    typer.echo("")
+    typer.echo(f"Validation day {', '.join(m['days']['validation'])}: PR-AUC by decision time")
+    for stage in run["validation"]["stages"].values():
+        typer.echo(f"  {stage['title']}")
+        cells = [c for c in stage["cells"] if c["slice"] == "all"]
+        for model, label in MODEL_NAMES.items():
+            got = {c["offset_s"]: c["pr_auc"]["value"] for c in cells if c["model"] == model}
+            typer.echo(f"    {label:26s}" + "".join(f"{got[o]:>9.3f}" for o in sorted(got)))
+    path = write_results(cfg.root, run["folder"])
+    typer.echo("")
+    typer.echo(f"Models and reports saved to {run['folder']} in {m['seconds']} s; "
+               f"results written to {path}")  # fmt: skip
+
+
+@app.command("score-test")
+def score_test(
+    yes: Annotated[bool, typer.Option("--yes", help="Do not ask before scoring.")] = False,
+) -> None:
+    """Score the test days with the saved R5 models: once (spec 15.4). Refused when a
+    test report already exists. Results go to docs/R5_RESULTS.md."""
+    from agent.models.evaluate import load_plan
+    from agent.models.report import write_results
+    from agent.models.train import AlreadyScored, model_dir
+    from agent.models.train import score_test as score
+
+    cfg = load_config()
+    plan, sha = load_plan(cfg.root / "config" / "evaluation.yaml")
+    if not yes and not typer.confirm("This scores the test days. It can be done once. Go on?"):
+        raise typer.Exit(1)
+    try:
+        report = score(cfg.data_dir, plan, sha, progress=typer.echo)
+    except (AlreadyScored, FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from None
+    path = write_results(cfg.root, model_dir(cfg.data_dir))
+    typer.echo(f"Scored {report['coins']:,} coins of the test days; results written to {path}")
+
+
+@app.command()
 def signals(
     hours: Annotated[float, typer.Option(help="Tokens created in this many recent hours.")] = 2.0,
     at: Annotated[int, typer.Option(help="Seconds after creation to judge each token.")] = 60,
