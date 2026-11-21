@@ -44,6 +44,7 @@ from agent.backtest import run as r6
 from agent.dataset.build import FILE_NAME, build_dataset
 from agent.dataset.build import OUT_FOLDER as DATASET_FOLDER
 from agent.ingest.backfill_coverage import backfill_fingerprint, backfill_spans, covered
+from agent.ingest.oldfaithful_backfill import read_progress
 from agent.labels.make_labels import load_label_settings
 from agent.models.evaluate import DAY_S, EvaluationPlan, split_days, whole_days
 from agent.models.frame import dataset_split, load_frame, role_ranges
@@ -210,6 +211,21 @@ def _first_test_days(data_dir: Path, period: Period) -> list[str]:
     return manifest["days"]["test"]
 
 
+def incomplete_epochs(data_dir: Path) -> list[str]:
+    """Epochs with a chunk that failed or was never read. The backfill's covered
+    stretches join pieces less than a minute apart (so that two epochs are one stretch),
+    and a failed chunk is 14 to 28 seconds of chain time: it would not show as a break.
+    So the period's dataset is only built when no chunk is missing anywhere."""
+    out = []
+    for path in sorted((data_dir / "backfill").glob("epoch-*/progress.jsonl")):
+        p = read_progress(path)
+        ids = sorted(p.done)
+        holes = (ids[-1] - ids[0] + 1 - len(ids)) if ids else 0
+        if p.failed or holes or not ids:
+            out.append(f"{path.parent.name} ({len(p.failed)} failed, {holes} not read)")
+    return out
+
+
 def compare_with_first(data_dir: Path, view: Path, known_until: int) -> dict:
     """Rows of coins launched up to `known_until` in the first dataset and in the
     period's: how many, and how many differ in any column. They must be the same rows:
@@ -257,6 +273,11 @@ def build(root: Path, data_dir: Path, holdout: HoldoutPlan, name: str, *,
     first_span = first["backfill_spans"][0]
     settings, _ = load_label_settings(root / "config" / "labels.yaml")
     spans = backfill_spans(data_dir)
+    missing = incomplete_epochs(data_dir)
+    if missing:
+        raise NotAllowed("The backfill has chunks that failed or were not read: "
+                         f"{', '.join(missing)}. Run `agent backfill` for those epochs "
+                         "again first.")  # fmt: skip
     # One unbroken stretch from where the first dataset starts to the end of the last
     # label of the period's last coin.
     if not covered(spans, first_span[0], period.end + settings.horizon_s):

@@ -25,7 +25,7 @@ Training data is the backfill; the live tools built so far stay as a demo.
 | R4. More history | Done 2026-11-21 (user OK'd; option B; branch `r1-labels`) | Epochs 1085-1091: 2,755 GB downloaded in 11.3 h, 35 GB kept; one unbroken span of 206.6 h with no gaps. Dataset rebuilt: 367,730 coins, 1,464,896 rows to model on. Results in "R4" below. |
 | R5. Models | Done 2026-11-21 (user OK'd; branch `r5-models`) | Leak review, baselines and LightGBM for stages 1-3; test days Nov 18-19 scored once. LightGBM beats every baseline in every stage; the backfill-only signals add nothing. Results in "R5" below and `docs/R5_RESULTS.md`. |
 | R6. Backtest (analysis) | Done 2026-11-21 (user OK'd; branch `r6-backtest`) | Day plan and lookahead review reported first; test days Nov 18-19 simulated once. No signal made money after costs (every coin: -0.199 SOL per 1 SOL signal under the strict view, -0.068 under the generous one; the best model signal -0.106 and -0.017). Results in "R6" below and `docs/R6_RESULTS.md`. |
-| H2. New-days check | **In progress since 2026-11-21: waiting for the archive** (worktree branch `claude/confident-poitras-85ab6e`) | The frozen R5 models and R6 backtest on Nov 20-22, days nothing has seen. Plan OK'd by the user; `config/holdout.yaml` and the `agent holdout` commands are written and tested; the download of epochs 1092-1094 waits for the archive (last one about Mon Nov 23 evening PST). Nothing is scored yet. See "H2" below. |
+| H2. New-days check | **In progress since 2026-11-21: waiting for the archive** (worktree branch `claude/confident-poitras-85ab6e`) | The frozen R5 models and R6 backtest on Nov 20-22, days nothing has seen. Plan OK'd by the user; `config/holdout.yaml` and the `agent holdout` commands are written and tested; epoch 1092 is read and complete; 1093 and 1094 wait for the archive (last one about Mon Nov 23 evening PST). Nothing is scored yet. pump.fun was updated again on Nov 20, inside the new period. See "H2" below. |
 | R7. Write-up | Not started | |
 
 Build order from 2026-11-12 to 2026-11-13: the fast path in spec 15.0 (user's decision,
@@ -120,7 +120,38 @@ test run did, and the models, the dataset and the settings give exactly the save
 The check was run a second time after the "same pattern" rule was reworded, because the
 period file's hash is part of what `score` and `backtest` compare.
 
-### Built (branch `claude/confident-poitras-85ab6e`, not committed)
+### Epoch 1092 (read Nov 21, 10:58 AM to 1:16 PM PST)
+
+| Check | Result |
+|---|---|
+| Download | 373.6 GB in 2.30 h at 45 MB/s (R4: 63-75 MB/s); 4.10 GB kept; 2.4 CPU hours; 25.81 h of chain time. |
+| Failed chunks | **12 of 6,750 failed on the archive's rate limit (HTTP 429)**, all in the first tenth of the epoch. Read again at 1:20 PM with 2 workers (0.9 GB): 6,750 of 6,750 done, the gap log is empty. |
+| Coverage | One unbroken span, Nov 11 2:18 PM to Nov 21 6:40 AM PST. Every epoch 1084-1092: 6,750 chunks done, none failed, none unread. |
+| Read problems | 0 unreadable transactions, 0 undecodable events, 0 unknown events, 0 cut-off logs. |
+| Layout | The 8-byte tail on every curve and pool trade event, as before; none on any other event. |
+| Duplicates | None: 410,542 launches are 410,542 different coins; no repeated trade event in the new span. |
+| Rows per hour (counts only, no outcomes) | 25 whole new hours, none under 40% of the earlier median. Medians 1,619 launches, 166,756 curve trades, 555,631 pool trades (before: 1,696, 186,945, 682,347). |
+
+**Found: a failed chunk would not have shown as a gap.** `backfill_spans` joins covered
+pieces less than 60 s apart, so that two epochs form one stretch; a failed chunk is 14 to
+28 s of chain time, so with the 12 chunks missing the backfill still showed "one unbroken
+span". R4 had no failed chunk, so nothing built so far is affected. `agent holdout build`
+now refuses while any epoch has a failed or unread chunk (tested).
+`ingest/backfill_coverage.py` is left as it is for now: its hash is recorded with the
+datasets. To fix with the next rebuild: join across epochs only.
+
+**Found: pump.fun and PumpSwap were updated again, inside the new period.** Read from the
+chain: both programs were last deployed in slots 471,854,454 and 471,854,493, **Nov 20 at
+11:28 AM PST** (19:28 UTC), in epoch 1092. So of the new days, Nov 20 has 19.5 h before
+the update and 4.5 h after it; Nov 21-22 are entirely after it. The models and the cuts
+come from before it. What can be seen without looking at outcomes: the event layouts did
+not change (above), and the fee rates on curve trades are the same in the 6 h before and
+after (0.95% + 0.30% creator fee on most trades). Trading behaviour may still differ.
+Nothing in the plan changes: the period is the one fixed beforehand, and results are
+reported per day, so Nov 20 against Nov 21-22 will show whether the update matters.
+Added to spec 16 with change-log entry 30 (the user's OK, Nov 21).
+
+### Built (branch `claude/confident-poitras-85ab6e`; commit 4e72687, Nov 21, before any new day was downloaded)
 
 - `config/holdout.yaml`: the period, what is frozen, what counts as "held".
 - `src/agent/holdout/run.py`, command `agent holdout build | check | score | backtest | report`:
@@ -147,9 +178,9 @@ period file's hash is part of what `score` and `backtest` compare.
 
 ### Still to do
 
-1. Download epochs 1092-1094 (started 3:48 AM PST Nov 21 in a terminal tab with `--wait`;
-   it starts each epoch when the archive has it). Then coverage, gaps and the layout check
-   per epoch, as in R4.
+1. Epochs 1093 and 1094 (the command started 3:48 AM PST Nov 21 in a terminal tab with
+   `--wait` starts each when the archive has it; 1092 is done). Then coverage, failed
+   chunks, gaps and the layout check per epoch, as for 1092 above.
 2. `agent holdout build`, then `agent holdout check` again if anything changed.
 3. `agent holdout score` and `agent holdout backtest`, once each; `docs/H2_RESULTS.md`.
 4. Tests, lint, this file, and the user's OK.

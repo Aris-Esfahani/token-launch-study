@@ -636,6 +636,14 @@ Written into `config/evaluation.yaml` before any model is scored on the test day
   backfill), but trading behaviour or fees may have. Training has about 31 h after the
   update; validation and test are entirely after it. The backtest (R6) uses fees read from
   the chain for after the update.
+  *(Added 2026-11-21, new-days check.)* **A second update, inside the second held-out
+  period:** both programs were deployed again on Nov 20, 2026 at 11:28 AM PST (slots
+  471,854,454 and 471,854,493, read from the chain). The event layouts did not change, and
+  the fee rates on curve trades are the same in the 6 hours before and after; trading
+  behaviour may differ. Of the period's days (15.4), Nov 20 has 19.5 h before it and 4.5 h
+  after; Nov 21-22 are entirely after it. The models and the cuts are from before it. The
+  period was fixed before this was known and is not changed; its results are reported per
+  day.
 - **Padre changes:** irrelevant to the agent by design (no Padre dependency), but keep `padre_presets.yaml` in sync with the user's real settings.
 - High-risk market. Real money only after a sustained positive paper record, and only amounts the user can afford to lose.
 
@@ -746,3 +754,5 @@ Not used as training data: single Oct 2024 snapshot, aggregator-sourced (survivo
 **2026-11-21, new-days check** (decided by the user before any new day was downloaded; evidence in `docs/PROGRESS.md`, "H2: new-days check"). Marked in place with "new-days check".
 
 29. **Second held-out period (15.3, 15.4, 13):** the frozen R5 models and the frozen R6 backtest are run once on Nov 20-22, days nothing has seen. The first split stays fixed (training Nov 12-16, validation Nov 17, test Nov 18-19) instead of moving with the newest days; the new period, what is frozen, the once-only rule and what counts as "held" are in `config/holdout.yaml`, written before any new day was scored. This adds to the plan and loosens nothing: `config/evaluation.yaml`, the models, the cuts and every threshold are unchanged.
+
+30. **Second program update (16):** pump.fun and PumpSwap were deployed again on Nov 20, 2026 at 11:28 AM PST, inside the second held-out period (found on 2026-11-21 when epoch 1092 was read; added with the user's OK). Layouts and curve fee rates unchanged; Nov 20 is mostly before it, Nov 21-22 entirely after. The period and every check stay as fixed beforehand. No threshold or "done when" check changed.

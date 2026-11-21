@@ -116,6 +116,15 @@ def test_the_period_gets_its_own_dataset_and_the_first_one_is_not_touched(tmp_pa
         H.build(root, data, plans_of(["1970-01-13", "1970-01-14"]), "h2")
 
     _more_backfill(data, 16 * DAY_S + 5_000)
+    # A chunk that failed (a few seconds of chain time, too short to break the covered
+    # stretch) must be read again before the period's dataset is built.
+    progress = data / "backfill" / "epoch-1085" / "progress.jsonl"
+    complete = progress.read_text(encoding="utf-8")
+    failed = {"kind": "commit", "chunks": [], "files": [], "failed": {"1": "HTTP 429"}}
+    progress.write_text(complete + json.dumps(failed) + "\n", encoding="utf-8")
+    with pytest.raises(H.NotAllowed, match=r"epoch-1085 \(1 failed, 0 not read\)"):
+        H.build(root, data, plans, "h2")
+    progress.write_text(complete, encoding="utf-8")
     made = H.build(root, data, plans, "h2")
     view = H.view_dir(data, "h2")
     assert {p: p.read_bytes() for p in kept} == kept  # the first labels and dataset: as before
