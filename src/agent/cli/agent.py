@@ -742,6 +742,91 @@ def backtest(
                f"results written to {path}")  # fmt: skip
 
 
+HOLDOUT_STEPS = ("build", "check", "score", "backtest", "report")
+
+
+@app.command()
+def holdout(
+    step: Annotated[str, typer.Argument(help="build, check, score, backtest or report.")],
+    period: Annotated[str, typer.Option(help="A period of config/holdout.yaml.")] = "h2",
+    yes: Annotated[bool, typer.Option("--yes", help="Do not ask before a once-only "
+                                      "step.")] = False,  # fmt: skip
+) -> None:
+    """A second held-out period (spec 15.4; config/holdout.yaml): the frozen R5 models and
+    the frozen R6 backtest on days nothing has seen. `build` makes the period's own labels
+    and dataset beside the first ones; `check` scores and simulates the validation day
+    again and must get the saved numbers; `score` and `backtest` run the period's days,
+    once each; `report` writes docs/<PERIOD>_RESULTS.md with the verdict. Nothing is
+    trained, tuned or traded."""
+    from agent.holdout import run as H
+    from agent.holdout.report import write_results
+    from agent.models.evaluate import load_plan
+    from agent.models.rules import RulesError
+
+    if step not in HOLDOUT_STEPS:
+        typer.echo(f"Unknown step {step!r}: one of {', '.join(HOLDOUT_STEPS)}.")
+        raise typer.Exit(1)
+    cfg = load_config()
+    plan, _ = load_plan(cfg.root / "config" / "evaluation.yaml")
+    try:
+        plans, sha = H.load_holdout(cfg.root / "config" / "holdout.yaml")
+        days = ", ".join(H.get_period(plans, period).days)
+        if step in ("score", "backtest") and not yes and not typer.confirm(
+            f"This runs `{step}` on {days}. It can be done once. Go on?"
+        ):
+            raise typer.Exit(1)
+        if step == "build":
+            made = H.build(cfg.root, cfg.data_dir, plans, period, progress=typer.echo)
+            same = made["same_as_first"]
+            typer.echo("")
+            typer.echo(f"Period {period} ({days}): {made['coins']:,} coins, {made['rows']:,} "
+                       f"rows, {made['usable_rows']:,} to model on; epochs "
+                       f"{made['epochs'][0]}-{made['epochs'][-1]}.")  # fmt: skip
+            typer.echo(f"Rows of coins the first dataset knew completely: {same['rows']:,}; "
+                       f"only in the first {same['only_in_first']}, only in the new "
+                       f"{same['only_in_new']}: "
+                       + ("the same rows." if made["same"] else "NOT the same rows."))  # fmt: skip
+            typer.echo(f"Saved in {H.view_dir(cfg.data_dir, period)}")
+            if not made["same"]:
+                raise typer.Exit(1)
+        elif step == "check":
+            got = H.check(cfg.root, cfg.data_dir, plan, plans, sha, period, progress=typer.echo)
+            typer.echo("")
+            typer.echo(f"Validation day {', '.join(got['validation_days'])} again, in "
+                       f"{got['seconds']} s:")  # fmt: skip
+            typer.echo("  R5 scores, largest difference from the saved report: "
+                       f"{got['r5_validation_scores_largest_difference']:.1e}")  # fmt: skip
+            typer.echo("  R6 cuts worked out again, largest difference from the frozen ones: "
+                       f"{got['r6_cuts_largest_difference']:.1e}")  # fmt: skip
+            typer.echo(f"  R6 ledger: {got['r6_validation_ledger_files']} files, "
+                       + ("byte for byte the saved ones" if got["r6_validation_ledger_same_files"]
+                          else "NOT the saved ones"))  # fmt: skip
+            typer.echo("  R6 report, largest difference from the saved one: "
+                       f"{got['r6_validation_cells_largest_difference']:.1e}")  # fmt: skip
+            typer.echo("Check passed." if got["passed"] else "Check FAILED: the new days must "
+                       "not be scored or simulated.")  # fmt: skip
+            if not got["passed"]:
+                raise typer.Exit(1)
+        elif step == "score":
+            report = H.score(cfg.root, cfg.data_dir, plan, plans, sha, period,
+                             progress=typer.echo)  # fmt: skip
+            typer.echo(f"Scored {report['coins']:,} coins of {days} in {report['seconds']} s.")
+        elif step == "backtest":
+            report = H.backtest(cfg.root, cfg.data_dir, plan, plans, sha, period,
+                                progress=typer.echo)  # fmt: skip
+            typer.echo(f"Simulated {report['ledger']['rows']:,} trades on {report['coins']:,} "
+                       f"coins of {days} in {report['seconds']} s.")  # fmt: skip
+        if step in ("score", "backtest", "report"):
+            path, verdicts = write_results(cfg.root, cfg.data_dir, plans, sha, period)
+            for key, title in (("r5", "R5, the models"), ("r6", "R6, the backtest")):
+                if key in verdicts:
+                    typer.echo(f"{title}: {verdicts[key]}.")
+            typer.echo(f"Results written to {path}")
+    except (H.NotAllowed, FileNotFoundError, ValueError, RulesError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from None
+
+
 @app.command()
 def signals(
     hours: Annotated[float, typer.Option(help="Tokens created in this many recent hours.")] = 2.0,

@@ -1,0 +1,73 @@
+# Held-out periods after the first test days (spec 15.4, note of 2026-11-21): do the R5
+# and R6 results hold on days that no model, cut or setting has ever seen?
+#
+# Written 2026-11-21, with the user's OK, before any of these days was downloaded. Fixed
+# before any result: do not loosen it later. Nothing is trained, tuned or chosen on these
+# days. `config/evaluation.yaml` is not changed (its hash is the one the R5 models were
+# trained under), and the first split stays as it is: training Nov 12-16, validation
+# Nov 17, test Nov 18-19.
+#
+# Each period has its own data folder, <data folder>/holdout/<name>/: it reads the same
+# backfill through folder links and holds its own labels, dataset and reports, so the
+# dataset the models were trained on is never rebuilt. A period is scored once and
+# simulated once (`agent holdout score`, `agent holdout backtest`); each refuses a second
+# run, and both refuse when this file, the models, the cuts, the settings or the code
+# changed after `agent holdout check` passed.
+
+periods:
+  h2:
+    title: Second held-out period
+    # Whole UTC days. Nov 20 was a part-day at the edge of the first backfill: in no set,
+    # never scored, never simulated. Epochs 1092-1094 make these three days whole.
+    days: ["2026-11-20", "2026-11-21", "2026-11-22"]
+    models: r5        # <data folder>/models/r5, exactly as saved (checked against its manifest)
+    backtest: r6      # <data folder>/backtest/r6: its cuts and its settings, as frozen
+
+# What counts as "the results held", decided before looking. The new period is compared
+# with the first test days (Nov 18-19) cell by cell; every cell that fails is listed.
+holds:
+  model: lightgbm                 # the model the claims are about (no backfill-only signals)
+  stages: [bad, grad_later, hit_2x]   # all coins, each of the four decision times
+
+  # R5, "beats the baselines". The metric is the share of bad coins caught when blocking
+  # at most 30% of fine ones for stage 1, and PR-AUC for stages 2 and 3. The model's value
+  # must be above each of `beats`, and the low end of its 95% interval above each of
+  # `interval_above`.
+  beats: [base_rate, rules, logistic]
+  interval_above: [base_rate, rules]
+
+  # R5, "same size": the new 95% interval overlaps the Nov 18-19 one, for PR-AUC and the
+  # share caught at 30% blocked (stage 1), and for PR-AUC and the precision of the top 5
+  # and top 20 per hour (stages 2 and 3).
+
+  # R5, "calibration" (stages 2 and 3): the model's Brier score is below the base rate's,
+  # and its mean predicted rate divided by the rate that happened is within these limits
+  # (Nov 18-19: 0.88 to 1.02).
+  calibration_ratio: [0.75, 1.33]
+
+  # R6, on the headline setting of config/backtest.yaml and config/padre_presets.yaml
+  # (our buy leaves no trace, the default delay, all four decision times together), for
+  # every signal and exit plan:
+  # - "still no profit": every mean profit or loss per signal is below zero, and under
+  #   the generous view (our SOL stays in the reserves) no 95% interval lies entirely
+  #   above zero.
+  # - "same size": each 95% interval overlaps its Nov 18-19 one, in both views.
+  # - "same pattern": at each other tested delay the 95% interval overlaps the Nov 18-19
+  #   one for that delay; mayhem coins do not do clearly better than ordinary ones (the
+  #   mayhem interval entirely above the ordinary one); no single day has an interval
+  #   entirely above zero.
+  #   (Reworded 2026-11-21 with the user's OK, before any new day was downloaded. As first
+  #   written, "the delays' intervals overlap one another; mayhem coins lose more than
+  #   ordinary ones", the check failed on Nov 18-19 itself in 3 of 114 cells: with over
+  #   100,000 signals the 2 s and 10 s intervals of "Rules: pass or caution" are tight
+  #   enough to show that delay has a small effect, and the 20 mayhem picks of "Logistic
+  #   2x, about 5 per hour" lost less than its ordinary picks. Nov 18-19 passes the
+  #   reworded check in every cell. No other check changed.)
+
+  # The verdict, for R5 and for R6 separately:
+  # - "held": every check passes.
+  # - "held in direction but not in size": "beats the baselines" (R5) or "still no
+  #   profit" (R6) passes, another check does not.
+  # - "did not hold": "beats the baselines" or "still no profit" fails. A signal that
+  #   turns profitable is "did not hold", not a finding: one period cannot show a profit,
+  #   and it would need another period that nothing has seen.

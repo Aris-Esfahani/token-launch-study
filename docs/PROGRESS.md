@@ -25,6 +25,7 @@ Training data is the backfill; the live tools built so far stay as a demo.
 | R4. More history | Done 2026-11-21 (user OK'd; option B; branch `r1-labels`) | Epochs 1085-1091: 2,755 GB downloaded in 11.3 h, 35 GB kept; one unbroken span of 206.6 h with no gaps. Dataset rebuilt: 367,730 coins, 1,464,896 rows to model on. Results in "R4" below. |
 | R5. Models | Done 2026-11-21 (user OK'd; branch `r5-models`) | Leak review, baselines and LightGBM for stages 1-3; test days Nov 18-19 scored once. LightGBM beats every baseline in every stage; the backfill-only signals add nothing. Results in "R5" below and `docs/R5_RESULTS.md`. |
 | R6. Backtest (analysis) | Done 2026-11-21 (user OK'd; branch `r6-backtest`) | Day plan and lookahead review reported first; test days Nov 18-19 simulated once. No signal made money after costs (every coin: -0.199 SOL per 1 SOL signal under the strict view, -0.068 under the generous one; the best model signal -0.106 and -0.017). Results in "R6" below and `docs/R6_RESULTS.md`. |
+| H2. New-days check | **In progress since 2026-11-21: waiting for the archive** (worktree branch `claude/confident-poitras-85ab6e`) | The frozen R5 models and R6 backtest on Nov 20-22, days nothing has seen. Plan OK'd by the user; `config/holdout.yaml` and the `agent holdout` commands are written and tested; the download of epochs 1092-1094 waits for the archive (last one about Mon Nov 23 evening PST). Nothing is scored yet. See "H2" below. |
 | R7. Write-up | Not started | |
 
 Build order from 2026-11-12 to 2026-11-13: the fast path in spec 15.0 (user's decision,
@@ -38,6 +39,120 @@ verdict, D screen, E paper ledger; the full backfill (Phase 4) runs in the backg
 | C. Live signals + rules verdict | **Built 2026-11-12 (branch `step-b`)** | The engine judges every new token at T+30/60/120/300 s; `agent check-live` compares live with replay. The same feature code builds the research dataset (R2). Results in "Step C" below. |
 | D. Screen | **Built 2026-11-12 (branch `step-b`); kept as a demo** | `agent screen`: alert feed, paste box, clipboard watcher, status bar; the engine answers over a local connection. Results in "Step D" below. |
 | E. Paper ledger | Paused 2026-11-13 (research track) | `padre_presets.yaml` is kept as settings for the R6 backtest. |
+
+## H2: new-days check (research track; plan and code 2026-11-21, runs pending)
+
+**Question:** R5 and R6 rest on two test days (Nov 18-19) of one market. Do they hold on
+days that no model, cut or setting has ever seen? No retraining, no new tuning.
+
+**Done when:** a results file (`docs/H2_RESULTS.md`) shows the new days beside Nov 18-19:
+the R5 metrics and the R6 profit or loss per signal, with 95% intervals from resampling
+whole launch hours, and says plainly whether the results held, including where they did
+not. **State: not yet. Nothing is downloaded, scored or simulated on the new days.**
+
+### The plan (reported first; the user's OK 2026-11-21, 3:47 AM PST: "Yes, Nov 20-22")
+
+| Part | Decision |
+|---|---|
+| Days | **Nov 20-22**, three whole UTC days. Nov 20 was a part-day at the edge of the first backfill: in no set, never scored or simulated. |
+| Download | Epochs 1092-1094, asked for first. From R4's numbers: about 1,180 GB to download (333-464 GB each), about 1.6 h each, about 15 GB kept; D: has 972 GB free. |
+| When | The archive publishes 5-10 h after an epoch ends. From a public Solana node at 3:40 AM PST Nov 21: 1092 ends Sat Nov 21 6:41 AM, 1093 Sun Nov 22 8:30 AM, 1094 Mon Nov 23 10:20 AM. So Nov 22 is whole from about Monday evening. |
+| The first split stays fixed | `split_days` takes the most recent quarter of the whole days, so with Nov 20-22 in the dataset the test set would become Nov 20-22, validation Nov 19 and training Nov 12-18 for every command and for the R3 notebook. So the dataset in `D:\memecoin-agent-data\dataset\` is **not rebuilt**, and `config/evaluation.yaml` is **not changed** (its hash is in the R5 manifest; its loader refuses unknown settings; `src/agent/models/` is part of the backtest's frozen code hash). |
+| Where the new period lives | `config/holdout.yaml` (written before any new day was downloaded) and its own data folder `D:\memecoin-agent-data\holdout\h2\`: the same backfill through folder links (no copy), its own labels and dataset from the unchanged builders. |
+| Frozen | The R5 model files against their manifest; the R6 cuts; `config/backtest.yaml` and `config/padre_presets.yaml` as the R6 reports recorded them. |
+| Once | `agent holdout score` and `agent holdout backtest` each refuse a second run, and both refuse after any change to the above. |
+| What counts as "held" | Fixed in `config/holdout.yaml` and spec 15.4 before looking; see below. |
+
+**What counts as "held"** (LightGBM without backfill-only signals, all coins, each decision
+time, new days against Nov 18-19):
+- **R5, beats the baselines:** above the base rate, the rules and logistic regression, and
+  the low end of its interval above the base rate and the rules. Metric: bad coins caught
+  at 30% blocked (stage 1), PR-AUC (stages 2-3).
+- **R5, same size:** the new interval overlaps the Nov 18-19 one for PR-AUC, the top 5 and
+  top 20 per hour and the share caught at 30% blocked.
+- **R5, calibration:** Brier score below the base rate's; mean predicted rate within 0.75
+  to 1.33 times the rate that happened (Nov 18-19: 0.88 to 1.02).
+- **R6, still no profit:** every signal and exit plan has a mean below zero under the
+  strict view (5 s delay, all four decision times), and no interval lies entirely above
+  zero under the generous view.
+- **R6, same size:** each interval overlaps its Nov 18-19 one, in both views.
+- **R6, same pattern:** at 2 s and at 10 s the interval overlaps the Nov 18-19 one for
+  that delay; mayhem coins do not do clearly better than ordinary ones (the mayhem interval
+  entirely above the ordinary one); no single day has an interval entirely above zero.
+  **Reworded 2026-11-21, 4:50 AM PST, with the user's OK, before any new day was
+  downloaded.** As first written ("the 2 s, 5 s and 10 s intervals overlap; mayhem coins
+  lose more than ordinary ones") it failed on Nov 18-19 itself in 3 of 114 cells, found by
+  running the checks on the saved Nov 18-19 report against itself: the 2 s and 10 s
+  intervals of "Rules: pass or caution" under `quick_50_25` do not overlap (-0.156 and
+  -0.169; with over 100,000 signals a small effect of the delay shows), and the 20 mayhem
+  picks of "Logistic 2x, about 5 per hour" lost less than its ordinary picks under two
+  exit plans. Nov 18-19 passes the reworded check in every cell, and every other check
+  as first written.
+- **Verdict, for R5 and R6 separately:** "held", "held in direction but not in size", or
+  "did not hold" (when "beats the baselines" or "still no profit" fails), with every
+  failing cell listed. A signal that turns profitable is "did not hold", not a finding.
+
+### What was found while planning (2026-11-21)
+
+| Check | Result |
+|---|---|
+| This worktree | Cut from `main` (5505fef), which has neither R5 nor R6. Its branch was fast-forwarded to `r6-backtest` (da66f28); no other branch or folder was touched. |
+| Archive | `agent backfill --epoch 1092 --status`: not published yet. |
+| R5 model files | 12 of 12 match their manifest; `config/evaluation.yaml` matches the hash the models were trained under; the dataset is the one they were trained on. |
+| R6 cuts and settings | `cuts.json` matches `frozen.json`; today's presets and backtest settings equal the ones stored in the three R6 reports. |
+| `frozen.json` against today's files | **Two hashes differ, both for known reasons.** (1) Presets: Padre's fee was switched to 1% after the test run (R6, "The fee headline was switched"); it changes no simulated trade. (2) Code: `resummarize` was added to `backtest/run.py` after the test days were simulated. Today's code hash (c3d62372c37c) is the one in the reports' `summarized_again`; the simulating code's hash (37ac75130f64) was never committed, so the two cannot be compared file by file. **Hence the check below.** |
+| Line endings | A fresh worktree checks text files out with CRLF, the main folder has most with LF, so hashes of the raw files (`presets_sha`, `settings_sha`) differ between the two folders though the text is the same. The new code compares file content whatever the line endings. |
+
+### The check on the validation day (run 4:04 to 4:11 AM PST, Nov 21)
+
+`agent holdout check`: Nov 17 scored and simulated again with the saved models, the frozen
+cuts and today's code, in 449 s. No test day and no new day was read.
+
+| Compared with what was saved | Result |
+|---|---|
+| R5 validation report (every stage, model, decision time, slice, interval) | Largest difference 0 |
+| The cuts, worked out again from Nov 17 | Largest difference from `cuts.json` 0 |
+| R6 validation ledger (1,367,964 simulated trades) | 8 of 8 files byte for byte the saved ones |
+| R6 validation report (every cell) | Largest difference 0 |
+
+So today's code, with `resummarize` added, simulates exactly the trades the code of the
+test run did, and the models, the dataset and the settings give exactly the saved numbers.
+The check was run a second time after the "same pattern" rule was reworded, because the
+period file's hash is part of what `score` and `backtest` compare.
+
+### Built (branch `claude/confident-poitras-85ab6e`, not committed)
+
+- `config/holdout.yaml`: the period, what is frozen, what counts as "held".
+- `src/agent/holdout/run.py`, command `agent holdout build | check | score | backtest | report`:
+  - `build`: makes `holdout\h2\` with folder links to `raw_backfill` and `backfill`, builds
+    labels and the dataset there with the unchanged builders, and compares every row of
+    coins the first dataset knew completely (launched up to 65 min before the first
+    backfill's end) with the first dataset: they must be the same, value for value.
+    Refuses while the backfill does not cover the period (it does today).
+  - `check`: scores and simulates the validation day (Nov 17) again with the saved models,
+    the frozen cuts and today's code; must give the saved R5 validation report, the frozen
+    cuts, the same 8 ledger files byte for byte and the saved R6 validation report. No
+    test day and no new day is read; no cut is chosen.
+  - `score`, `backtest`: once each. They use R5's own row loader and scoring and R6's own
+    signals, ledger and summary, called from outside; none of those files is changed.
+- `src/agent/holdout/report.py`: the checks above cell by cell, the verdicts, and
+  `docs/H2_RESULTS.md` with both periods side by side and every number of the new one.
+- Spec: a dated note in 15.4, a row in 15.3, a note in 13 and change-log entry 29.
+- Tests: 393 pass (11 new), lint clean. The new tests cover: the period file; hashes that
+  ignore line endings; the period's folder (the first labels and dataset are byte for byte
+  untouched; a changed value is found; removing the folder leaves the backfill); the
+  period's rows from R5's loader; each frozen file's change is named; the check passes on
+  a faithful rebuild and fails on a ledger or a score that differs; both runs refuse
+  before a check, after any change and a second time; the verdicts in every direction.
+
+### Still to do
+
+1. Download epochs 1092-1094 (started 3:48 AM PST Nov 21 in a terminal tab with `--wait`;
+   it starts each epoch when the archive has it). Then coverage, gaps and the layout check
+   per epoch, as in R4.
+2. `agent holdout build`, then `agent holdout check` again if anything changed.
+3. `agent holdout score` and `agent holdout backtest`, once each; `docs/H2_RESULTS.md`.
+4. Tests, lint, this file, and the user's OK.
 
 ## R6: backtest as analysis (research track, built and closed 2026-11-21)
 
