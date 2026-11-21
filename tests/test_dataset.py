@@ -296,5 +296,5 @@ def _imports(folder: Path) -> set[str]:
 def test_nothing_that_makes_signals_reads_the_dataset():
     """The dataset holds labels, so code that makes signals or labels never imports it."""
     src = ROOT / "src" / "agent"
-    for part in ("features", "daemon", "tui", "labels", "ingest", "sim"):
+    for part in ("features", "daemon", "tui", "labels", "ingest", "sim", "scoring"):
         assert not any(n.startswith("agent.dataset") for n in _imports(src / part)), part

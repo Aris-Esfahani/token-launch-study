@@ -104,6 +104,10 @@ def test_engine_records_prints_and_stops_on_request(tmp_path, capsys):
     assert trades == [(MINT_B, False), (MINT_A, True)]
     final = read_status(files)
     assert final["state"] == "stopped" and final["rows_written"]["trades"] == 2
+    # No saved models in this folder: the engine ran all the same and says why (step L1).
+    models = status["live"]["models"]
+    assert models["on"] is False
+    assert "manifest not found" in models["why"] and "agent train" in models["why"]
     assert engine_state(files)[0] == "stopped"
     assert not files.pid.exists() and not files.stop_flag.exists()
     assert json.loads((cfg.run_dir / "recorder_state.json").read_text())["clean"] is True
@@ -198,3 +202,48 @@ def test_engine_with_two_connections_records_each_transaction_once(tmp_path):
     assert status["live"]["enabled"] and status["live"]["tokens_seen"] == 1
     assert final["rows_written"]["trades"] == 3 and final["gaps_logged"] == 0
     assert (cfg.run_dir / "alerts.log").exists()
+
+
+def test_engine_with_the_saved_models_loads_them_and_says_so(tmp_path):
+    """Spec 15.3 step L1: with the model files on disk the engine starts with model scores
+    on; with one file changed it still starts, scores off, and says which file."""
+    pytest.importorskip("lightgbm")  # research packages: pip install -e ".[research]"
+    pytest.importorskip("sklearn")
+    from scoring_helpers import make_models
+
+    async def run_once(port: int) -> dict:
+        cfg = load_config(tmp_path)
+        files = RunFiles(cfg.run_dir)
+        task = asyncio.create_task(engine.run(cfg, foreground=False))
+        status = None
+        for _ in range(150):
+            status = read_status(files)
+            if status and status.get("state") == "running" and status["messages"] == 5:
+                break
+            await asyncio.sleep(0.1)
+        files.stop_flag.write_text("stop", encoding="utf-8")
+        assert await asyncio.wait_for(task, timeout=15) == 0
+        return status
+
+    async def scenario():
+        async with serve(fake_feed, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            make_project(tmp_path, ws_url=f"ws://127.0.0.1:{port}")
+            (tmp_path / "config" / "rules.yaml").write_text(
+                "caution:\n  - {feature: snipers, at_least: 2, reason: snipers}\n",
+                encoding="utf-8",
+            )
+            make_models(tmp_path / "data")
+            with_models = await run_once(port)
+            model = tmp_path / "data" / "models" / "r5" / "bad" / "lightgbm.txt"
+            model.write_bytes(model.read_bytes() + b"\n")
+            return with_models, await run_once(port)
+
+    with_models, changed = asyncio.run(scenario())
+    models = with_models["live"]["models"]
+    assert with_models["live"]["enabled"] and models["on"] is True
+    assert models["version"] == "r5" and models["trained_days"] == ["2026-11-12", "2026-11-16"]
+    assert (models["scored"], models["not_scored"]) == (0, 0)  # no coin reached T+30 s here
+    off = changed["live"]["models"]
+    assert changed["live"]["enabled"] and off["on"] is False
+    assert "bad/lightgbm.txt is not the one the R5 manifest lists" in off["why"]

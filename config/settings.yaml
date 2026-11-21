@@ -67,6 +67,17 @@ recorder:
   # as a restart, count toward the same burst.
   session_break_hours: 1
 
+# Scores from the saved R5 models beside each live verdict (spec 15.3, step L1). Analysis
+# only: the backtest (R6) found no signal that makes money after costs. The engine runs
+# without them when the research packages or the model files are missing, and
+# `agentd status` then says why. Prepare the models once with `agent export-live-models`.
+live_models:
+  enabled: true
+  # A coin gets scores only if at least this share of the hour before its launch was
+  # recorded (the models read the number of launches in that hour). A setting, not a
+  # measured value; it equals the recorder's uptime target.
+  min_hour_covered: 0.95
+
 dataset:
   # Days of pump.fun history wanted for a first model (spec 4.1: start with 2-4 weeks,
   # target 2-3 months). `agentd status` shows a bar toward it. Most of it will come

@@ -359,7 +359,7 @@ def _imports(folder: Path) -> set[str]:
 def test_labels_and_features_never_import_each_other():
     """Labels look into the future, so nothing that makes signals may read them."""
     src = ROOT / "src" / "agent"
-    for part in ("features", "daemon", "models", "tui"):
+    for part in ("features", "daemon", "models", "tui", "scoring"):
         assert not any(n.startswith("agent.labels") for n in _imports(src / part)), part
     assert not any(n.startswith(("agent.features", "agent.daemon"))
                    for n in _imports(src / "labels"))  # fmt: skip

@@ -4,6 +4,10 @@ app so it can be tested without a terminal.
 Every line about a coin starts with its mint, so it can be pasted into Padre's search
 (spec 1). Names and symbols come from whoever launched the coin, so they are cleaned:
 control characters are dropped and the length is capped.
+
+Model scores (spec 15.3, step L1) are analysis, not advice: every probability is shown
+beside the outcome's usual rate, with how late it came, and the panel always says when
+the models were trained and that the backtest found no signal that makes money.
 """
 
 from __future__ import annotations
@@ -12,6 +16,8 @@ from agent import clock
 
 LEVEL_STYLE = {"pass": "bold green", "caution": "yellow", "avoid": "red", "error": "magenta"}
 MAX_LABEL = 20
+# The models' stages in plain words (a stage not named here is shown by its name).
+STAGE_WORDS = {"bad": "bad", "grad_later": "graduates later", "hit_2x": "2x before half"}
 
 
 def clean(text: object, limit: int = MAX_LABEL) -> str:
@@ -60,6 +66,80 @@ def alert_text(alert: dict) -> str:
     )
 
 
+def _pct(share: float | None) -> str:
+    """A probability or rate as a percentage: one decimal below 10%."""
+    if share is None:
+        return "?"
+    return f"{share * 100:.1f}%" if share < 0.0995 else f"{share * 100:.0f}%"
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _days(days: list[str] | None) -> str:
+    """A run of days ("2026-11-12", ...) as "Nov 12-16, 2026" (days are UTC days)."""
+    try:
+        (y1, m1, d1), (y2, m2, d2) = ([int(x) for x in day.split("-")] for day in
+                                      (days[0], days[-1]))  # fmt: skip
+        first, last = f"{_MONTHS[m1 - 1]} {d1}", f"{_MONTHS[m2 - 1]} {d2}"
+    except (TypeError, ValueError, IndexError):
+        return "?"
+    if (y1, m1, d1) == (y2, m2, d2):
+        return f"{first}, {y1}"
+    if (y1, m1) == (y2, m2):
+        return f"{first}-{d2}, {y1}"
+    return f"{first} to {last}, {y2}" if y1 == y2 else f"{first}, {y1} to {last}, {y2}"
+
+
+def score_text(verdict: dict, stages: list[dict]) -> str:
+    """One decision time's model scores: each stage's probability beside its usual rate,
+    or why there is none."""
+    late = verdict.get("wait_s")
+    head = f"T+{verdict['offset_s']}s" + (f", {late:.0f}s late" if late is not None else "")
+    scores = verdict.get("scores")
+    if not scores:
+        return f"{head}: no score (the models were not on when this verdict was made)"
+    if "p" not in scores:
+        return f"{head}: no score: {scores.get('why')}"
+    usual = verdict.get("usual") or {}
+    missing = scores.get("missing") or {}
+    parts = []
+    for stage in stages:
+        name = stage["name"]
+        words = STAGE_WORDS.get(name, name)
+        if name in scores["p"]:
+            parts.append(f"{words} {_pct(scores['p'][name])} (usual {_pct(usual.get(name))})")
+        else:
+            parts.append(f"{words} - ({missing.get(name, 'no score')})")
+    return f"{head}: " + " · ".join(parts)
+
+
+def model_lines(a: dict) -> list[str]:
+    """The model-score part of the analysis panel. Empty for an engine that does not
+    know about model scores."""
+    models = a.get("models")
+    if models is None:
+        return []
+    if not models.get("on"):
+        return [f"model scores off: {models.get('why')}"]
+    history = a.get("verdicts") or []
+    if not history:
+        return ["no model score yet (the first is at T+30s)"]
+    test_days = _days(models.get("test_days"))
+    lines = ["model scores, as analysis and not advice (usual = how often it happened on the "
+             f"test days {test_days}, same time, same kind of coin):"]  # fmt: skip
+    lines += ["  " + score_text(v, models.get("stages") or []) for v in history]
+    lines.append(f"! models trained on {_days(models.get('trained_days'))}; the market drifts, "
+                 "and the backtest found no signal that makes money after costs")  # fmt: skip
+    context = ((history[-1].get("scores") or {}).get("context")) or {}
+    covered = context.get("day_covered")
+    if covered is not None and covered < 1 and "p" in (history[-1].get("scores") or {}):
+        lines.append(
+            f"! creator history: {covered:.0%} of the 24 h before launch recorded, so the "
+            f"creator's launch count ({context.get('dev_launches_24h')}) is a lower bound")
+    return lines
+
+
 def analysis_lines(a: dict) -> list[str]:
     """The analysis panel for one mint. Line 2 is always the verdict (or why there is
     none), so the app can colour it."""
@@ -100,6 +180,7 @@ def analysis_lines(a: dict) -> list[str]:
         if history
         else "no verdict yet (the first is at T+30s)"
     )
+    lines += model_lines(a)
     if via_curve:
         lines.append("! you copied the coin's bonding-curve address; its mint is the first line")
     if a.get("has_gap"):
@@ -141,6 +222,10 @@ def status_text(
         parts.append(f"verdicts {_num(wait, '.0f', 's')} late")
     elif live:
         parts.append("verdicts OFF")
+    models = live.get("models")
+    if models is not None:
+        parts.append(f"models {models.get('version', 'on')}" if models.get("on")
+                     else "model scores OFF")  # fmt: skip
     if not status.get("recording", True):
         parts.append("NOT RECORDING")
     gap = status.get("last_gap")

@@ -26,6 +26,7 @@ Training data is the backfill; the live tools built so far stay as a demo.
 | R5. Models | Done 2026-11-21 (user OK'd; branch `r5-models`) | Leak review, baselines and LightGBM for stages 1-3; test days Nov 18-19 scored once. LightGBM beats every baseline in every stage; the backfill-only signals add nothing. Results in "R5" below and `docs/R5_RESULTS.md`. |
 | R6. Backtest (analysis) | Done 2026-11-21 (user OK'd; branch `r6-backtest`) | Day plan and lookahead review reported first; test days Nov 18-19 simulated once. No signal made money after costs (every coin: -0.199 SOL per 1 SOL signal under the strict view, -0.068 under the generous one; the best model signal -0.106 and -0.017). Results in "R6" below and `docs/R6_RESULTS.md`. |
 | R7. Write-up | Not started | |
+| L1. Live model scores (demo) | Done 2026-11-21 (user OK'd; branch `claude/silly-payne-d9066b`) | The engine scores every new coin at T+30/60/120/300 s with the saved R5 LightGBM models; the screen shows the probabilities beside the rules' verdict. Analysis only. On the real feed, 10,602 saved score records over 2.3 h equal their replay to the last digit. Results in "L1" below. |
 
 Build order from 2026-11-12 to 2026-11-13: the fast path in spec 15.0 (user's decision,
 now paused). Steps: A close Phases 1 and 3, B engine always on, C live signals + rules
@@ -38,6 +39,164 @@ verdict, D screen, E paper ledger; the full backfill (Phase 4) runs in the backg
 | C. Live signals + rules verdict | **Built 2026-11-12 (branch `step-b`)** | The engine judges every new token at T+30/60/120/300 s; `agent check-live` compares live with replay. The same feature code builds the research dataset (R2). Results in "Step C" below. |
 | D. Screen | **Built 2026-11-12 (branch `step-b`); kept as a demo** | `agent screen`: alert feed, paste box, clipboard watcher, status bar; the engine answers over a local connection. Results in "Step D" below. |
 | E. Paper ledger | Paused 2026-11-13 (research track) | `padre_presets.yaml` is kept as settings for the R6 backtest. |
+
+## L1: live model scores (demo, built 2026-11-21)
+
+**Done when** (spec 15.3, step L1): scores saved with every verdict, the model files
+checked against the R5 manifest; the screen shows each probability beside its usual rate
+and says when a score is missing and why; live scores equal a replay of the recorded data
+to the last digit over at least 2 h; a no-lookahead test covers the launch-context signals
+in their live form; the engine still runs without the research packages.
+**Result: met in every part** (the real-feed check ran 4:21 to 6:40 AM PST, Nov 21).
+**Closed 2026-11-21 with the user's OK.**
+
+This reopens a part of the live side that was paused on 2026-11-13. The user OK'd the plan
+and the spec note on 2026-11-21 (spec change-log entry 29). **It is analysis, not advice:**
+R6 found no signal that makes money after costs, and nothing here places a trade.
+
+Built on branch `claude/silly-payne-d9066b` (cut from `r6-backtest`):
+- `src/agent/scoring/launch_context.py`: the three launch-context signals counted live
+  (`LaunchIndex`), and how much of the hour and of the 24 hours before a launch the
+  history covers (`LaunchHistory`: the recording outside its logged gaps, plus the
+  backfill).
+- `src/agent/scoring/live.py`: loads the saved LightGBM models, checks every file
+  against the SHA-256 in the R5 manifest, and scores one coin at one decision time.
+- `src/agent/export_live.py` and `agent export-live-models` (research side): write the
+  calibration maps as plain numbers to `models/r5_live/bundle.json`, then compare the
+  engine's scoring with R5's own on the validation day.
+- `src/agent/scoring/replay_check.py`, and `agent check-live` extended: saved scores are
+  made again from the recorded data and must be identical.
+- Engine (`daemon/live_state.py`, `daemon/main.py`): each verdict gets a `scores` column
+  in `live/verdicts/`; `agentd status` has a `models:` line.
+- Screen (`tui/view.py`): the analysis panel lists the scores at each decision time the
+  coin has passed, each beside its usual rate, with the limits; the status bar says
+  whether model scores are on.
+- Setting: `live_models` in `config/settings.yaml` (`enabled`, `min_hour_covered` 0.95).
+- Tests: 410 pass (28 new), lint clean.
+
+### The five points settled with the user before building
+
+| Point | What was done |
+|---|---|
+| Reopening paused live work | Spec note: optional step L1 in 15.3, an exception in the research-track note and the section 2 non-goal, change-log entry 29. |
+| The launch-context signals, live | Counted from the launches on disk (recording and backfill) plus the live feed, from launches strictly before the coin's own. Each score saves the share of the hour and of the 24 h before the launch that was recorded. Under 95% of the hour: no score, with the reason. Under 100% of the 24 h: scored and marked "the creator's launch count is a lower bound" (the user's choice over "no score until 24 h exist"). |
+| The wall between labels and live code | New package `scoring/`, added to both wall tests. A new test loads the engine, the screen and the scoring code in a fresh Python and fails if any label-side module was loaded. |
+| Engine without the research packages | It starts and gives rule verdicts; `agentd status` and the screen say "model scores off" and why (the same test checks that LightGBM, scikit-learn, joblib and pandas are not loaded by starting the engine). |
+| Limits shown | On the screen with every analysis: when the models were trained, that the market drifts, that the backtest found no profitable signal, how late each score came, and a mark when the creator history is short. |
+
+### Why the calibration is exported
+
+The R5 folder keeps each stage's calibration (and logistic regression) in
+`models.joblib`. That file cannot be opened without loading `agent.models.train` (it
+refers to a function there), and that module loads the dataset code and through it the
+labels. The LightGBM models are plain text files. So the engine reads the LightGBM files
+directly, and `agent export-live-models` writes the calibration maps once, as numbers,
+with the hash of the `models.joblib` they came from. The engine checks that hash and the
+LightGBM files against the R5 manifest and refuses anything else. The R5 folder is not
+changed (a test compares every file's hash before and after). Only LightGBM is scored
+live: it beat logistic regression in every stage (R5), and it keeps scikit-learn out of
+the engine.
+
+### Checks
+
+| Check | Result |
+|---|---|
+| Tests | 410 pass (28 new), ruff clean |
+| Engine's scoring = R5's own, same rows (validation day, Nov 17) | 4,108 rows through R5's scoring code and through the engine's scorer: 0 differ, raw score and probability, to the last digit |
+| Engine's scoring = R5's own, from raw events (validation day) | 540 coins launched 6:00-6:20 AM UTC, Nov 17, replayed from the backfill through the live code (`TokenState`, `LaunchHistory`, the scorer): 2,160 rows, 0 differ; the live launch-context signals equal the dataset's in every row |
+| Model files checked against the manifest | Tests: a changed LightGBM file, a changed `models.joblib`, a bundle made from other models, other signals, a broken calibration map and a missing bundle are each refused with a reason |
+| No-lookahead, launch-context signals in their live form | Tests: 500 launches at or after a coin's own second change none of its three signals; in the engine, 900 launches arriving before the verdicts change no score's context at any decision time; the live counts equal the training SQL on 4,000 random launches |
+| The wall | Tests: nothing in `scoring`, `daemon`, `tui` or `features` imports the labels, the dataset, the training frame, the training code or the backtest; a fresh Python that loads the engine, screen and scoring code holds none of them |
+| Engine with and without the models | Tests: a real engine run against a fake feed starts with model scores on when the files are there, and with one model file changed it still starts, scores off, naming the file; no LightGBM or no model files gives a reason; verdicts go on; a scoring error costs no verdict |
+| Live scores = replay, recorded fixtures | Tests: real transactions through the recorder and the scorer; `agent check-live` finds every saved score identical to the last digit, and reports a score changed by 0.000000000001 |
+| Live scores = replay, real feed, at least 2 h | **Pass.** `agent check-live --hours 3` at 6:40 AM PST: 10,602 verdicts carry a score record, 8,931 of them with probabilities; all 10,602 made again from the recorded data are identical to the last digit, 0 different, over 2.29 h of verdicts. The signals of all 13,034 verdicts of those 3 h are identical too. See "The run on the real feed" |
+| Earlier results untouched | No file under `features/`, `models/`, `sim/`, `dataset/`, `labels/` or `backtest/` changed, so the code hashes recorded with the dataset and frozen with the backtest are the same. The test days were not scored or simulated again: the usual rates are read from the saved report |
+
+Dry run on the real recording (read-only, 4:06 AM PST, Nov 21, while the engine of the
+main folder was recording): the models load in about 2 s and the launch history (368,175
+launches, 329 logged gaps) in about 3.5 s; scoring takes about 0.35 ms per verdict. Of
+378 coins launched in the half hour before, 46 (12%) were not paired with SOL and get no
+score. The recording had started 30 minutes earlier, so every other coin had under 41% of
+its last hour recorded and gets no score yet, as intended; and 5% of its last 24 hours
+(the backfill ends Nov 20, 4:52 AM PST).
+
+### What the screen shows
+
+```
+<MINT>  $SYM · age 5m 00s · curve 0% · mc 28.0 SOL · data as of 3s ago
+CAUTION: <the rules' reasons>
+...
+verdicts so far: T+30s caution · T+60s caution · T+120s caution · T+300s caution
+model scores, as analysis and not advice (usual = how often it happened on the test days Nov 18-19, 2026, same time, same kind of coin):
+  T+30s, 5s late: bad 98% (usual 87%) · graduates later 14% (usual 1.2%) · 2x before half 20% (usual 2.8%)
+  T+60s, 5s late: bad 94% (usual 87%) · graduates later 0.2% (usual 1.1%) · 2x before half 0.4% (usual 2.4%)
+! models trained on Nov 12-16, 2026; the market drifts, and the backtest found no signal that makes money after costs
+! creator history: 5% of the 24 h before launch recorded, so the creator's launch count (0) is a lower bound
+```
+
+(A real coin of this morning, scored in the dry run with the one-hour minimum switched off
+for the preview.) Without a score the line gives the reason, for example
+`T+60s, 31s late: no score: only 40% of the hour before its launch was recorded (95%
+needed to count the launches in it)`.
+
+### Findings
+
+1. **A short creator history matters.** On the training days only 37% of coins came from
+   a creator with no launch in the 24 hours before (median 6 earlier launches, 90th
+   percentile 154), and for 48% the 24-hour count is larger than the 1-hour count. Its
+   share of the models' SHAP values is 5-6% in stages 1-2 and 0.6% in stage 3. So scores
+   in the first day after a start are somewhat off for serial launchers, which is why
+   they are marked.
+2. **`agent check-live` no longer worked on this data folder.** It read the recording
+   together with the backfill, and matching every recorded event against 35 GB of history
+   runs out of memory. It now replays the recording only, which is what the engine saw
+   (20 minutes of coins in 11 s). `agent signals` reads both in the same way and has the
+   same problem; it is not changed here.
+3. **About one coin in eight is not paired with SOL** in this morning's sample and gets
+   no score (the models cover SOL-paired coins, spec 5).
+
+### Limits
+
+- **Trained on five days** (Nov 12-16, 2026), tested on two. Nothing here measures how
+  fast the models age; the live scores are not evaluated against outcomes.
+- **Scores come late.** The free feed often runs 5 to 77 s behind, and a score waits for
+  its data (`wait_s` in each verdict).
+- **Live launches are not exactly the backfill's.** The feed delivers at "confirmed", so
+  a few launches it counts never land on chain (Phase 3 found 1.3% of trades), and
+  launches missed in gaps are not counted. The coverage shares say how much was recorded,
+  not that the count is exact.
+- **Only the four decision times.** Between them, and after T+300 s, there is no new score.
+- **No profitable signal** (R6). The scores describe; they do not recommend.
+
+### The run on the real feed (Nov 21, 4:21 to 6:40 AM PST; restart OK'd by the user)
+
+The engine that ran the main folder's code (rule verdicts only, since 3:36 AM) was stopped
+cleanly at 4:20:42 AM and started from this branch's code. The public server refused new
+connections for about 35 s after the stop, so the restart left a 47 s gap (logged).
+
+| | |
+|---|---|
+| Verdicts made in the run (to 6:40 AM) | 10,690, none touched by a gap (24 reconnects, each covered by the other connection) |
+| With probabilities | 9,002 verdicts on 2,280 coins, from 4:34:39 to 6:40:20 AM (2.09 h) |
+| Without, and why | Not paired with SOL (about 10% of verdicts); too little of the last hour recorded (the first 13 minutes after the restart: the recording began at 3:36 AM) |
+| How late a score came | Median 3.4 s after its decision time, 90% within 5.1 s, the latest 32 s |
+| Creator history behind the scores | 5% to 13% of the 24 h before launch recorded, so every score of this run carries the "lower bound" mark |
+| `agent check-live --hours 3` | 10,602 score records made again from the recorded data: 10,602 identical to the last digit, 0 different (19 s to run) |
+| Network | 5.9 GB in 2 h 19 m, about 2.5 GB an hour |
+
+The scores look like the models' usual output, which is all this says (they are not
+checked against outcomes, which lie in the future of the run): the mean predicted chance
+of "2x before half" was 7.3%, 4.1%, 2.3% and 1.2% at the four decision times, beside test
+day rates of 6.3%, 3.6%, 1.9% and 1.0%; the mean predicted chance of "bad" was 88-90%
+(test days 93%). 60% of the scored coins were mayhem coins.
+
+An earlier check, five minutes after the restart, had already compared the first 116
+score records, none with probabilities yet: identical, so the launch counts and the
+recorded-history shares are the same live and replayed.
+
+The engine was left running on this branch's code (started from the worktree folder, with
+a `.env` there that holds only `DATA_DIR`). After this branch is brought into the main
+folder, restart it from there: `agentd stop`, then `agentd start`.
 
 ## R6: backtest as analysis (research track, built and closed 2026-11-21)
 

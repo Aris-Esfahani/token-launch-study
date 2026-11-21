@@ -4,6 +4,10 @@ Keeps one or more live connections open at once (spec 15.0 step B), parses pump.
 events, records them to Parquet with a gap log, judges every new token at T+30/60/120/300
 s with the rules in config/rules.yaml (step C), and keeps a heartbeat file so `agentd
 status` and `agentd stop` work. In foreground mode it prints events, verdicts or alerts.
+
+With the saved R5 models on disk and the research packages installed, each verdict also
+gets the models' scores (spec 15.3, step L1; analysis only). Without them the engine runs
+as before and says that model scores are off, and why.
 """
 
 from __future__ import annotations
@@ -32,14 +36,22 @@ from agent.daemon.control import (
 )
 from agent.daemon.local_api import HOST as API_HOST
 from agent.daemon.local_api import LocalApi
-from agent.features.token_state import CreatorIndex
 from agent.ingest import downloads
+from agent.ingest.backfill_coverage import backfill_spans
+from agent.ingest.gaps import read_gaps
 from agent.ingest.parsers import ParsedTx
 from agent.ingest.pipeline import Pipeline
 from agent.ingest.recorder import ParquetSink
 from agent.ingest.rpc import Rpc, RpcError
 from agent.ingest.ws_client import LogNotification, LogsStream
 from agent.logging_setup import redact, setup_logging
+from agent.scoring.launch_context import (
+    LaunchHistory,
+    LaunchIndex,
+    first_recorded_ts,
+    load_launch_index,
+)
+from agent.scoring.live import LiveScorer, ScoringOff, load_scorer
 from agent.sim.chain_config import fetch_snapshot, save_snapshot
 
 log = logging.getLogger("agentd")
@@ -228,33 +240,45 @@ _DEFAULT_PUBKEY = "1" * 32  # an all-zero address: pump.fun's marker for "paired
 _WRAPPED_SOL = "So11111111111111111111111111111111111111112"
 
 
-def _creator_index(data_dir: Path) -> CreatorIndex:
-    """Every recorded or backfilled launch, so `dev_prior_launches` counts the same live
-    as in a replay. Missing data just means fewer launches counted."""
-    import duckdb  # only the engine's start-up needs it
-
-    creators = CreatorIndex()
-    patterns = [
-        f"{(data_dir / root / 'tokens').as_posix()}/*/*.parquet"
-        for root in ("raw", "raw_backfill")
-        if any((data_dir / root / "tokens").glob("*/*.parquet"))
-    ]
-    if not patterns:
-        return creators
-    with duckdb.connect() as db:
-        rows = db.execute(
-            f"SELECT creator, ts, mint FROM read_parquet({patterns!r}, union_by_name=true) "
-            "ORDER BY ts"
-        ).fetchall()
-    for creator, ts, mint in rows:
-        creators.add(creator, ts, mint)
-    return creators
+def _launch_history(data_dir: Path, gaps_this_run: list[dict]) -> LaunchHistory:
+    """Every recorded or backfilled launch, so `dev_prior_launches` and the models'
+    launch-context signals count the same live as in a replay, and the stretches of time
+    those launches are complete for (the backfill's spans, and the recording outside its
+    gaps). Missing data just means fewer launches counted, and says so in the coverage."""
+    return LaunchHistory(
+        load_launch_index(data_dir),
+        recorded_from=first_recorded_ts(data_dir),
+        backfill=backfill_spans(data_dir),
+        gap_lists=[read_gaps(data_dir / "gaps"), gaps_this_run],
+    )
 
 
-def _live_status(live: live_state.LiveSignals | None, rules: live_state.RulesFile) -> dict:
+def _load_models(cfg: AppConfig) -> tuple[LiveScorer | None, str | None]:
+    """The saved models, or None and why model scores are off. Never raises: the engine
+    records and gives rule verdicts without them."""
+    settings = cfg.settings.live_models
+    if not settings.enabled:
+        return None, "turned off in config/settings.yaml (live_models.enabled)"
+    try:
+        return load_scorer(cfg.data_dir, min_hour_covered=settings.min_hour_covered), None
+    except ScoringOff as exc:
+        return None, str(exc)
+    except Exception as exc:  # noqa: BLE001 - never let the models stop the engine
+        log.exception("the saved models could not be loaded")
+        return None, f"the saved models could not be loaded ({type(exc).__name__})"
+
+
+def _live_status(live: live_state.LiveSignals | None, rules: live_state.RulesFile,
+                 models_off: str | None = None) -> dict:  # fmt: skip
     if live is None:
-        return {"enabled": False, "rules_error": rules.error}
+        return {"enabled": False, "rules_error": rules.error,
+                "models": {"on": False, "why": models_off or "live verdicts are off"}}  # fmt: skip
     st = live.stats
+    models = live.models()
+    models = {k: models[k] for k in ("on", "why", "version", "bundle_sha", "trained_days")
+              if k in models}  # fmt: skip
+    models |= {"scored": st.scored, "not_scored": st.not_scored,
+               "last_not_scored": st.last_not_scored}  # fmt: skip
     return {
         "enabled": True,
         "tokens_tracked": st.tokens_tracked,
@@ -265,6 +289,7 @@ def _live_status(live: live_state.LiveSignals | None, rules: live_state.RulesFil
         "last_alert": st.last_alert,
         "rules_sha": live.rules_sha,
         "rules_error": rules.error,
+        "models": models,
     }
 
 
@@ -315,16 +340,24 @@ async def run(
             print(f"settings.yaml program '{name}' does not match the IDL address {address}.")
             return 1
 
+    scorer, models_off = _load_models(cfg)
     if rules.rules:
         try:
-            creators = _creator_index(cfg.data_dir)
+            history = _launch_history(cfg.data_dir, pipeline.gap_log.logged)
         except Exception as exc:  # noqa: BLE001 - never let this stop recording
             log.warning("could not read earlier launches (%s); prior launches undercounted", exc)
-            creators = CreatorIndex()
-        live = live_state.LiveSignals(rules.rules, rules.sha, creators, pipeline.gap_log.logged)
+            history = LaunchHistory(LaunchIndex(), gap_lists=[pipeline.gap_log.logged])
+        live = live_state.LiveSignals(
+            rules.rules, rules.sha, history.launches, pipeline.gap_log.logged,
+            scorer=scorer, history=history, models_off=models_off,
+        )
         log.info("live verdicts on (rules %s)", rules.sha)
     else:
         log.error("live verdicts off: %s", rules.error)
+    if scorer is not None and live is not None:
+        log.info("model scores on (%s, bundle %s; analysis only)", scorer.name, scorer.bundle_sha)
+    else:
+        log.warning("model scores off: %s", models_off or "live verdicts are off")
     verdict_sink = ParquetSink(
         cfg.data_dir / "live",
         {live_state.VERDICT_TABLE: live_state.VERDICT_COLUMNS},
@@ -452,7 +485,8 @@ async def run(
                 last_beat = now
                 rates = _rates(feed, pipeline)
                 latest_status = _status(
-                    "running", feed, pipeline, rates, proc_started, cfg, _live_status(live, rules)
+                    "running", feed, pipeline, rates, proc_started, cfg,
+                    _live_status(live, rules, models_off),
                 )
                 latest_status["local_api"] = api.stats()
                 write_status(files, latest_status)
@@ -502,7 +536,8 @@ async def run(
         for connection in feed.connections.values():
             connection.connected = False
         write_status(files, _status(
-            "stopped", feed, pipeline, rates, proc_started, cfg, _live_status(live, rules)
+            "stopped", feed, pipeline, rates, proc_started, cfg,
+            _live_status(live, rules, models_off),
         ))  # fmt: skip
         files.pid.unlink(missing_ok=True)
         files.stop_flag.unlink(missing_ok=True)

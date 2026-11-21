@@ -96,6 +96,15 @@ class LocalApi(BaseModel):
     port: int = 8765
 
 
+class LiveModels(BaseModel):
+    # Scores from the saved models beside each live verdict (spec 15.3, step L1).
+    # Analysis only. The engine runs without them when they cannot be loaded.
+    enabled: bool = True
+    # A coin is scored only if at least this share of the hour before its launch was
+    # recorded: the models read the number of launches in that hour.
+    min_hour_covered: float = 0.95
+
+
 class Settings(BaseModel):
     programs: dict[str, str]
     live: Live
@@ -105,6 +114,7 @@ class Settings(BaseModel):
     backfill: BackfillSettings = BackfillSettings()
     rpc: RpcSettings = RpcSettings()
     local_api: LocalApi = LocalApi()
+    live_models: LiveModels = LiveModels()
 
 
 @dataclass(frozen=True)

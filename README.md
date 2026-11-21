@@ -127,6 +127,41 @@ the live signals match a replay of the recorded data (they must be identical):
 The rules are starting guesses, not advice: tokens that pass are not yet known to do
 better than any others.
 
+### Model scores beside the verdicts (analysis only)
+
+With the saved models from `agent train` on disk, the engine also scores each coin at
+the same four moments (spec 15.3, step L1): the chance that it is bad (rug, dead or
+bundled), that it graduates later in the hour, and that it doubles before it halves.
+**This is analysis, not advice: in the backtest no signal made money after costs**
+(`docs/R6_RESULTS.md`). Prepare the models once (needs the research packages):
+
+```powershell
+.venv\Scripts\agent export-live-models
+```
+
+It writes the models' calibration as plain numbers to `models/r5_live/bundle.json` and
+checks, on the validation day, that the engine's scoring gives exactly the numbers the
+research code gives. At start-up the engine checks the model files against the hashes
+recorded when they were trained. `agentd status` has a `models:` line; without the
+research packages or the files the engine runs as before and that line says why scores
+are off.
+
+What to know when reading a score:
+- The models were trained on Nov 12-16, 2026. The market drifts, so they age.
+- A score is made only for the kind of coin the models were trained on: paired with SOL,
+  no recording gap in its life so far. Otherwise the verdict says why there is none.
+- The models read how many coins launched in the hour before, and how many the same
+  creator launched in the 24 hours before. The engine only knows the launches it
+  recorded (plus the backfill). With less than 95% of the last hour recorded there is no
+  score (`live_models.min_hour_covered` in `config/settings.yaml`); with less than the
+  full 24 hours the coin is scored and marked, because the creator's count is then a
+  lower bound. After a fresh start, scores begin about an hour in.
+- The free live feed often runs 5 to 77 seconds late, and a score waits for its data, so
+  a "T+30 s" score can arrive a minute after launch. Each one shows how late it came.
+
+`agent check-live` also makes the saved scores again from the recorded data with the same
+code; they must be identical to the last digit.
+
 ## The screen
 
 ```powershell
@@ -141,7 +176,10 @@ The window to keep beside Padre while you trade. It needs the engine running.
   (the clipboard watcher), or paste a mint into the box and press Enter. A coin's
   bonding-curve address works too; the panel then shows its mint first. You get the
   verdict with its reasons, the main signals (buyers, holders, top 10, dev, snipers,
-  buy/sell flow), its verdicts so far, and how old the data is.
+  buy/sell flow), its verdicts so far, and how old the data is. Below that, the models'
+  scores at each of the four moments the coin has passed, each beside its usual rate
+  (how often that outcome happened on the test days for the same moment and kind of
+  coin), for example `bad 97% (usual 87%)`, or the reason there is no score.
 - **Status** (bottom): feeds, how far behind the data is, the last gap, and how long
   copy-to-verdict takes (the median).
 
@@ -297,6 +335,11 @@ Everything is under `DATA_DIR` from `.env` (default: `./data`):
 ```
 raw/<table>/date=YYYY-MM-DD/part-*.parquet   recorded events, one folder per UTC day
 live/verdicts/date=YYYY-MM-DD/verdict-*.parquet  the engine's verdicts, with their signals
+                                             and the models' scores
+models/r5/                                   the saved models (`agent train`), their manifest
+                                             and reports
+models/r5_live/bundle.json                   the models' calibration as plain numbers, for
+                                             the engine (`agent export-live-models`)
 raw_backfill/<table>/date=YYYY-MM-DD/e*.parquet  the same tables from the archive
 gaps/gap-*.parquet                           every period when recording was off or unreliable
 backfill/epoch-<E>/                          archive index, progress and report per epoch
@@ -334,7 +377,8 @@ audit` measures what was missed, and the curve math reproduces every recorded tr
 Phase 3: `agent backfill` reads history from the archive and `agent parity` checks it
 against the recording. Fast path steps B and C: two live connections, continuous
 recording, and live rule verdicts for every new token. Step D: the screen (`agent
-screen`).
+screen`). Step L1 (2026-11-21): scores from the saved models beside each live verdict, as
+analysis only.
 
 Since 2026-11-13 the project is on the research track (spec 15.3): labels, a dataset built
 from the backfilled history, exploration, models with an evaluation plan fixed in advance

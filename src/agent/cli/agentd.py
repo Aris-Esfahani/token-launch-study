@@ -242,6 +242,7 @@ def status() -> None:
     typer.echo(f"history:   {days_line}")
     typer.echo(f"           {size_line}")
     typer.echo(f"verdicts:  {_verdicts(s.get('live'))}")
+    typer.echo(f"models:    {_models(s.get('live'))}")
     lag = s.get("lag_s")
     covered = s.get("covered_lag_s")
     covered_text = f" (all data up to {covered}s ago)" if covered is not None else ""
@@ -287,6 +288,22 @@ def _feed_lines(s: dict) -> list[str]:
         parts.append(f"{c.get('reconnects', 0)} drops")
         lines.append(f"feed {c['name']}:    " + ", ".join(parts))
     return lines
+
+
+def _models(live: dict | None) -> str:
+    """The saved models' scores beside the verdicts (analysis only), or why they are off."""
+    models = (live or {}).get("models")
+    if not models:
+        return "n/a (engine version without model scores)"
+    if not models.get("on"):
+        return f"OFF ({models.get('why')})"
+    days = models.get("trained_days") or ["?"]
+    scored, missed = models.get("scored", 0), models.get("not_scored", 0)
+    why = f"; latest reason: {models['last_not_scored']}" if models.get("last_not_scored") else ""
+    return (
+        f"on ({models.get('version')}, trained {days[0]} to {days[-1]}; analysis only: no "
+        f"signal made money in the backtest); {scored:,} verdicts scored, {missed:,} not{why}"
+    )
 
 
 def _verdicts(live: dict | None) -> str:

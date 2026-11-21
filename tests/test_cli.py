@@ -106,13 +106,30 @@ def test_status_when_stopped_shows_saved_time_and_burst_progress(project):
     assert "downloaded 0.0 GB of about 8,680 GB (0.00%)" in result.output
 
 
+def test_status_says_whether_model_scores_are_on_and_why_not():
+    from agent.cli.agentd import _models
+
+    live = {"enabled": True, "verdicts": {}, "models": {
+        "on": True, "version": "r5", "trained_days": ["2026-11-12", "2026-11-16"],
+        "scored": 1200, "not_scored": 34, "last_not_scored": "not paired with SOL"}}  # fmt: skip
+    assert _models(live) == (
+        "on (r5, trained 2026-11-12 to 2026-11-16; analysis only: no signal made money in "
+        "the backtest); 1,200 verdicts scored, 34 not; latest reason: not paired with SOL")
+    off = {"enabled": True, "models": {"on": False, "why": "lightgbm is not installed"}}
+    assert _models(off) == "OFF (lightgbm is not installed)"
+    assert _models({"enabled": True}) == "n/a (engine version without model scores)"
+    assert _models(None) == "n/a (engine version without model scores)"
+
+
 def test_audit_explains_when_nothing_is_recorded_yet(project):
     result = runner.invoke(agent_app, ["audit"])
     assert result.exit_code == 1 and "Nothing has been recorded yet" in result.output
 
 
-def _live_run(project, *, tamper: bool = False):
-    """Record real transactions and make live verdicts the way the engine does."""
+def _live_run(project, *, tamper: bool = False, models: bool = False,
+              tamper_scores: bool = False):
+    """Record real transactions and make live verdicts the way the engine does. With
+    `models`, also score them with a small saved model, as the engine does at start-up."""
     from agent.daemon.live_state import VERDICT_COLUMNS, VERDICT_TABLE, LiveSignals
     from agent.features.token_state import CreatorIndex
     from agent.ingest.pipeline import Pipeline
@@ -123,6 +140,19 @@ def _live_run(project, *, tamper: bool = False):
     data = project / "data"
     rules = parse_rules({"caution": [{"feature": "snipers", "at_least": 1, "reason": "x"}]})
     signals = LiveSignals(rules, "t", CreatorIndex(), [])
+    if models:
+        from agent.daemon.main import _launch_history
+        from agent.scoring.live import load_scorer
+        from scoring_helpers import make_models
+
+        make_models(data)
+        # Nothing was recorded before these few seconds, so no hour is covered: turn
+        # the minimum off, for the engine here and for `check-live` (settings.yaml).
+        with open(project / "config" / "settings.yaml", "a", encoding="utf-8") as f:
+            f.write("live_models: {min_hour_covered: 0}\n")
+        history = _launch_history(data, [])
+        signals = LiveSignals(rules, "t", history.launches, [],
+                              scorer=load_scorer(data, min_hour_covered=0), history=history)
     pipeline = Pipeline(data, data / "run", on_row=signals.add)
     for name in fixture_names():
         if name.startswith("pump-"):
@@ -132,6 +162,9 @@ def _live_run(project, *, tamper: bool = False):
     for verdict in signals.due(10**12):
         if tamper:
             verdict["snapshot"] = {**verdict["snapshot"], "holders": 999}
+        if tamper_scores and "p" in verdict["scores"]:
+            p = verdict["scores"]["p"]
+            verdict["scores"] = {**verdict["scores"], "p": {**p, "bad": p["bad"] + 1e-12}}
         sink.add(VERDICT_TABLE, verdict)
     sink.flush()
 
@@ -141,6 +174,40 @@ def test_check_live_finds_live_and_replayed_signals_identical(project):
     result = runner.invoke(agent_app, ["check-live", "--hours", "1"])
     assert result.exit_code == 0, result.output
     assert "identical: 12 (100.00%)" in result.output and "different: 0" in result.output
+
+
+def test_check_live_says_when_the_verdicts_carry_no_model_scores(project):
+    _live_run(project)
+    result = runner.invoke(agent_app, ["check-live", "--hours", "1"])
+    assert result.exit_code == 0 and "Model scores: none in these verdicts" in result.output
+
+
+def test_check_live_finds_live_and_replayed_model_scores_identical(project):
+    """Spec 15.3 step L1: scores made live equal the scores made again from the Parquet
+    files the recorder wrote, with the same code, to the last digit."""
+    pytest.importorskip("lightgbm")
+    pytest.importorskip("sklearn")
+    _live_run(project, models=True)
+    result = runner.invoke(agent_app, ["check-live", "--hours", "1"])
+    assert result.exit_code == 0, result.output
+    assert "identical: 12 (100.00%)" in result.output
+    # One of the three recorded coins is not paired with SOL: no score, and the reason.
+    assert "12 verdicts carry a score record; 8 with probabilities, 4 without" in result.output
+    assert "no score (4): not paired with SOL" in result.output
+    assert "made again from the recorded data: 12" in result.output
+    assert "identical to the last digit: 12 (100.00%)" in result.output
+    assert result.output.count("different: 0") == 2
+
+
+def test_check_live_reports_a_model_score_that_differs_in_the_last_digit(project):
+    pytest.importorskip("lightgbm")
+    pytest.importorskip("sklearn")
+    _live_run(project, models=True, tamper_scores=True)
+    result = runner.invoke(agent_app, ["check-live", "--hours", "1"])
+    assert result.exit_code == 1
+    assert "identical: 12 (100.00%)" in result.output  # the signals still match
+    assert "identical to the last digit: 4 (33.33%)" in result.output  # the unscored ones
+    assert "different: 8" in result.output and "p (8)" in result.output
 
 
 def test_check_live_reports_a_difference(project):

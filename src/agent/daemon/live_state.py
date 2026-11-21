@@ -12,6 +12,11 @@ tracked (there is no create event to start from). With two connections a token's
 can arrive after some of its trades (the faster connection missed it, the slower one
 delivers it later), so trades of unknown tokens are held for a few minutes in case their
 create turns up.
+
+With the saved models loaded (spec 15.3, step L1) each verdict also carries their scores:
+the calibrated probability of each stage, made from the verdict's own snapshot plus the
+coin's launch context (`agent.scoring`). Analysis only; a verdict without a score says
+why. Scores are made at the decision times only, the ages the models were trained at.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import logging
 import math
 import time
 from collections import Counter, deque
@@ -30,6 +36,10 @@ from agent.features.token_state import SNAPSHOT_OFFSETS_S, CreatorIndex, TokenSt
 from agent.ingest.borsh_idl import Field
 from agent.ingest.gaps import overlap_seconds
 from agent.models.rules import PASS, Rule, RulesError, judge, load_rules
+from agent.scoring.launch_context import LaunchHistory
+from agent.scoring.live import LiveScorer
+
+log = logging.getLogger(__name__)
 
 # A cutoff counts as covered once the recording is this far past it. Event times are
 # whole seconds, so events stamped with the cutoff second can still arrive until the
@@ -60,6 +70,9 @@ VERDICT_COLUMNS = [
     Field("wait_s", "f64"),  # decided_at minus the cutoff: how late the verdict came
     Field("rules_sha", "text"),  # which version of config/rules.yaml judged it
     Field("snapshot", "json"),  # every signal the verdict saw
+    # The models' scores (agent.scoring.live.LiveScorer.score), or why there are none;
+    # empty when the engine ran without the models.
+    Field("scores", "json"),
 ]
 
 
@@ -85,6 +98,9 @@ class LiveStats:
     # (decided_at, wait_s) of recent verdicts, for the median delay in `agentd status`
     recent_waits: deque = field(default_factory=lambda: deque(maxlen=500))
     last_alert: dict | None = None
+    scored: int = 0  # verdicts with model scores
+    not_scored: int = 0  # verdicts the models were on for but could not score
+    last_not_scored: str | None = None  # the latest reason
 
 
 class LiveSignals:
@@ -99,10 +115,22 @@ class LiveSignals:
         keep_s: int = KEEP_S,
         settle_s: int = SETTLE_S,
         agent: str | None = None,
+        scorer: LiveScorer | None = None,
+        history: LaunchHistory | None = None,
+        models_off: str | None = None,
     ) -> None:
         self.rules = rules
         self.rules_sha = rules_sha
         self.creators = creators
+        # The saved models and the launch history their context signals are counted
+        # from; without either there are no scores and `models_off` says why.
+        self.scorer = scorer if history is not None else None
+        self.history = history
+        self.models_off = None if self.scorer is not None else (
+            models_off or "the engine was started without the saved models")
+        # True while no event was ever recorded before this run: the history then starts
+        # at this run's first recorded trade.
+        self._first_recording = history is not None and history.recorded_from is None
         self._gaps = gaps  # the gap log's rows; grows as the engine logs new gaps
         self._offsets = offsets
         self._keep_s = max(keep_s, max(offsets))
@@ -132,6 +160,8 @@ class LiveSignals:
             if curve:
                 self._curves[curve] = mint
             self.creators.add(row["creator"], row["ts"], mint)
+            if self.history is not None and self.history.launches is not self.creators:
+                self.history.launches.add(row["creator"], row["ts"], mint)
             for offset in self._offsets:
                 self._order += 1
                 heapq.heappush(self._due, (state.created_ts + offset, self._order, mint, offset))
@@ -139,6 +169,10 @@ class LiveSignals:
             for held_table, held_row in self._held.pop(mint, ()):
                 self._apply(tracked, held_table, held_row)
         elif table in ("trades", "curve_completes"):
+            if self._first_recording and table == "trades":
+                first = self.history.recorded_from
+                if first is None or row["ts"] < first:
+                    self.history.recorded_from = float(row["ts"])
             tracked = self._tokens.get(row["mint"])
             if tracked is not None:
                 self._apply(tracked, table, row)
@@ -195,14 +229,40 @@ class LiveSignals:
             "wait_s": round(now - cutoff, 2),
             "rules_sha": self.rules_sha,
             "snapshot": snapshot,
+            "scores": self._scores(state, snapshot, has_gap),
         }
-        tracked.history.append({"offset_s": offset, "level": level})
+        tracked.history.append({"offset_s": offset, "level": level, "wait_s": row["wait_s"],
+                                "scores": row["scores"]})  # fmt: skip
         self.stats.verdicts[level] += 1
         self.stats.verdicts_with_gap += has_gap
         self.stats.recent_waits.append((now, row["wait_s"]))
         if level == PASS and not has_gap:
             self.stats.last_alert = {"at": now, "mint": state.mint, "offset_s": offset}
         return row
+
+    def _scores(self, state: TokenState, snapshot: dict, has_gap: bool) -> dict | None:
+        """The models' scores for a verdict's snapshot, or why there are none. Whatever
+        goes wrong here must never cost a verdict."""
+        if self.scorer is None:
+            return None
+        try:
+            context = self.history.context(state.creator, state.created_ts)
+            scores = self.scorer.score(snapshot, context, has_gap)
+        except Exception as exc:  # noqa: BLE001 - scoring is extra; verdicts go on
+            log.exception("model scoring failed for %s", state.mint)
+            scores = {"model": self.scorer.name, "why": f"scoring failed ({type(exc).__name__})"}
+        if "p" in scores:
+            self.stats.scored += 1
+        else:
+            self.stats.not_scored += 1
+            self.stats.last_not_scored = scores.get("why")
+        return scores
+
+    def models(self) -> dict:
+        """Whether model scores are on, and what the screen should say about them."""
+        if self.scorer is None:
+            return {"on": False, "why": self.models_off}
+        return {"on": True, **self.scorer.info()}
 
     def _forget(self, covered_ts: float) -> None:
         old = [m for m, t in self._tokens.items() if t.state.created_ts + self._keep_s < covered_ts]
@@ -268,10 +328,18 @@ class LiveSignals:
             "level": level,
             "reasons": reasons,
             "has_gap": overlap_seconds(self._gaps, state.created_ts, cutoff) > 0,
-            "verdicts": list(tracked.history),
+            "verdicts": [self._with_usual(v, state.is_mayhem) for v in tracked.history],
+            "models": self.models(),
             "rules_sha": self.rules_sha,
             "snapshot": snapshot,
         }
+
+
+    def _with_usual(self, verdict: dict, is_mayhem: bool) -> dict:
+        """A past verdict for the screen: with each stage's usual rate beside its score."""
+        if self.scorer is None or not verdict.get("scores"):
+            return dict(verdict)
+        return {**verdict, "usual": self.scorer.usual(verdict["offset_s"], is_mayhem)}
 
 
 class RulesFile:

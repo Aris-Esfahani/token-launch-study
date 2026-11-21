@@ -149,9 +149,9 @@ def test_a_mint_is_analyzed_from_memory_up_to_the_settled_second():
     assert a["verdicts"] == [] and a["has_gap"] is False
     assert sum(live.stats.verdicts.values()) == 0  # a lookup is not a verdict
     # Earlier verdicts are listed; a lookup never looks before the launch.
-    live.due(T0 + 32)
+    live.due(T0 + 32, now=T0 + 36.0)
     assert live.analyze("M", covered_ts=T0 + 32)["verdicts"] == [
-        {"offset_s": 30, "level": "caution"}
+        {"offset_s": 30, "level": "caution", "wait_s": 6.0, "scores": None}
     ]
     assert live.analyze("M", covered_ts=T0 + 1)["cutoff_ts"] == T0
     assert live.analyze("M", covered_ts=None)["cutoff_ts"] == T0
@@ -229,3 +229,78 @@ def test_live_snapshots_equal_a_replay_of_what_was_recorded(tmp_path):
         state = states[verdict["mint"]]
         assert verdict["snapshot"] == state.snapshot(verdict["ts"], creators=replay.creators)
     assert any(v["snapshot"]["trades"] >= 1 for v in verdicts)
+
+
+# --- model scores beside the verdicts (spec 15.3 step L1) ---------------------------------
+
+
+def scored(scorer, gaps=None, **history_kwargs) -> LiveSignals:
+    from agent.scoring.launch_context import LaunchHistory, LaunchIndex
+
+    history_kwargs.setdefault("recorded_from", T0 - 200_000)
+    history = LaunchHistory(LaunchIndex(), **history_kwargs)
+    live = LiveSignals(RULES, "test", history.launches, gaps if gaps is not None else [],
+                       agent=AGENT, scorer=scorer, history=history)  # fmt: skip
+    live.add("tokens", create_row())
+    for row in launch().rows:
+        live.add("trades", row)
+    return live
+
+
+def test_every_verdict_carries_the_models_scores_made_from_its_own_snapshot():
+    from scoring_helpers import FakeScorer
+
+    scorer = FakeScorer()
+    live = scored(scorer)
+    live.creators.add("DEV", T0 - 500, "OLD")
+    verdicts = live.due(T0 + 400)
+    assert [v["offset_s"] for v in verdicts] == [30, 60, 120, 300]
+    for verdict, (snapshot, context, has_gap) in zip(verdicts, scorer.calls, strict=True):
+        assert snapshot is verdict["snapshot"] and has_gap is False  # no second snapshot
+        assert verdict["scores"]["p"] == {"bad": 0.9, "grad_later": 0.02, "hit_2x": 0.05}
+        assert context == {"dev_launches_24h": 1, "launches_last_hour": 1,
+                           "launch_hour_utc": (T0 % 86_400) // 3600,
+                           "hour_covered": 1.0, "day_covered": 1.0}  # fmt: skip
+    assert (live.stats.scored, live.stats.not_scored) == (4, 0)
+    # The screen gets every decision time so far, each with the usual rates beside it.
+    a = live.analyze("M", covered_ts=T0 + 400)
+    assert a["models"]["on"] is True and a["models"]["trained_days"][0] == "2026-11-12"
+    assert [v["offset_s"] for v in a["verdicts"]] == [30, 60, 120, 300]
+    assert all(v["usual"] == {"bad": 0.87, "grad_later": 0.011, "hit_2x": 0.024}
+               and v["scores"]["p"]["bad"] == 0.9 for v in a["verdicts"])  # fmt: skip
+    assert "usual" not in verdicts[0]  # the saved verdict holds the scores only
+
+
+def test_a_verdict_without_a_score_says_why_and_a_scoring_error_costs_no_verdict():
+    from scoring_helpers import FakeScorer
+
+    gap = [{"start_ts": T0 + 40.0, "end_ts": T0 + 50.0}]
+    live = scored(FakeScorer(), gaps=gap)
+    verdicts = {v["offset_s"]: v for v in live.due(T0 + 400)}
+    assert "p" in verdicts[30]["scores"] and "recording gap" in verdicts[60]["scores"]["why"]
+    assert (live.stats.scored, live.stats.not_scored) == (1, 3)
+    assert "recording gap" in live.stats.last_not_scored
+
+    broken = scored(FakeScorer(fail=True))
+    verdicts = broken.due(T0 + 400)
+    assert [v["level"] for v in verdicts] == ["caution", "avoid", "avoid", "avoid"]
+    assert all(v["scores"]["why"] == "scoring failed (RuntimeError)" for v in verdicts)
+
+
+def test_without_the_models_verdicts_go_on_and_the_lookup_says_scores_are_off():
+    live, _ = fed(models_off="lightgbm is not installed")
+    verdicts = live.due(T0 + 400)
+    assert len(verdicts) == 4 and all(v["scores"] is None for v in verdicts)
+    a = live.analyze("M", covered_ts=T0 + 400)
+    assert a["models"] == {"on": False, "why": "lightgbm is not installed"}
+    assert all("usual" not in v for v in a["verdicts"])
+    assert fed()[0].models()["why"] == "the engine was started without the saved models"
+
+
+def test_on_a_first_ever_recording_the_history_starts_at_the_first_recorded_trade():
+    from scoring_helpers import FakeScorer
+
+    live = scored(FakeScorer(), recorded_from=None)
+    (first, *_) = live.due(T0 + 400)
+    assert live.history.recorded_from == float(T0)  # the launch's first trade
+    assert first["scores"]["context"]["hour_covered"] == 0.0

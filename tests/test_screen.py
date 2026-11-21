@@ -227,3 +227,87 @@ def test_the_app_shows_alerts_and_analyzes_copied_and_typed_mints(tmp_path):
     assert "feeds 1/1 up" in status and "copy-to-verdict" in status
     assert len(latencies) == 3 and max(latencies) < 2.0  # spec: copy-to-verdict under 2 s
     assert len((tmp_path / "screen_latency.jsonl").read_text().splitlines()) == 3
+
+
+# --- model scores in the analysis panel (spec 15.3 step L1) --------------------------------
+
+
+def scored_analysis(**changes) -> dict:
+    from scoring_helpers import INFO
+
+    context = {"dev_launches_24h": 3, "launches_last_hour": 1800, "launch_hour_utc": 11,
+               "hour_covered": 1.0, "day_covered": 1.0}  # fmt: skip
+    usual = {"bad": 0.8717, "grad_later": 0.0108, "hit_2x": 0.0241}
+    verdicts = [
+        {"offset_s": 30, "level": "caution", "wait_s": 4.2, "usual": usual,
+         "scores": {"model": "r5/lightgbm", "context": context,
+                    "p": {"bad": 0.9712, "grad_later": 0.004, "hit_2x": 0.131}}},
+        {"offset_s": 60, "level": "avoid", "wait_s": 31.0, "usual": usual,
+         "scores": {"model": "r5/lightgbm", "context": context,
+                    "p": {"bad": 0.5, "hit_2x": 0.02},
+                    "missing": {"grad_later": "already graduated"}}},
+    ]  # fmt: skip
+    return analysis(**{"verdicts": verdicts, "models": {"on": True, **INFO}, **changes})
+
+
+def test_model_scores_are_shown_beside_the_verdict_with_their_usual_rates_and_limits():
+    lines = view.analysis_lines(scored_analysis())
+    assert lines[1] == "PASS: no rule fired"  # the rules' verdict keeps its place
+    assert lines[5] == "verdicts so far: T+30s caution · T+60s avoid"
+    assert lines[6] == (
+        "model scores, as analysis and not advice (usual = how often it happened on the "
+        "test days Nov 18-19, 2026, same time, same kind of coin):"
+    )
+    assert lines[7] == ("  T+30s, 4s late: bad 97% (usual 87%) · graduates later 0.4% "
+                        "(usual 1.1%) · 2x before half 13% (usual 2.4%)")  # fmt: skip
+    assert lines[8] == ("  T+60s, 31s late: bad 50% (usual 87%) · graduates later - "
+                        "(already graduated) · 2x before half 2.0% (usual 2.4%)")  # fmt: skip
+    assert lines[9] == ("! models trained on Nov 12-16, 2026; the market drifts, and "
+                        "the backtest found no signal that makes money after costs")  # fmt: skip
+    assert len(lines) == 10
+    assert view._days(["2026-11-30", "2026-12-01", "2026-12-02"]) == "Nov 30 to Dec 2, 2026"
+    assert view._days(["2026-11-17"]) == "Nov 17, 2026" and view._days(None) == "?"
+
+
+def test_a_missing_score_says_why_and_a_short_creator_history_is_pointed_out():
+    a = scored_analysis()
+    why = "only 40% of the hour before its launch was recorded (95% needed to count the " \
+          "launches in it)"
+    a["verdicts"][1]["scores"] = {"model": "r5/lightgbm", "context": {}, "why": why}
+    lines = view.analysis_lines(a)
+    assert lines[8] == f"  T+60s, 31s late: no score: {why}"
+    assert not any("creator history" in ln for ln in lines)  # nothing scored last: no note
+
+    partial = scored_analysis()
+    partial["verdicts"][1]["scores"]["context"] = {
+        **partial["verdicts"][1]["scores"]["context"], "day_covered": 0.31}
+    assert view.analysis_lines(partial)[-1] == (
+        "! creator history: 31% of the 24 h before launch recorded, so the creator's launch "
+        "count (3) is a lower bound"
+    )
+    made_before = scored_analysis()
+    made_before["verdicts"][0]["scores"] = None
+    assert view.analysis_lines(made_before)[7] == (
+        "  T+30s, 4s late: no score (the models were not on when this verdict was made)")
+
+
+def test_the_panel_says_when_model_scores_are_off_or_not_made_yet():
+    off = analysis(models={"on": False, "why": 'lightgbm is not installed (pip install -e '
+                                               '".[research]")'})  # fmt: skip
+    assert view.analysis_lines(off)[-1] == (
+        'model scores off: lightgbm is not installed (pip install -e ".[research]")')
+    early = scored_analysis(verdicts=[])
+    assert view.analysis_lines(early)[-1] == "no model score yet (the first is at T+30s)"
+    # An engine from before model scores sends nothing about them: nothing is added.
+    assert not any("model" in ln for ln in view.analysis_lines(analysis()))
+
+
+def test_the_status_bar_says_whether_model_scores_are_on():
+    status = {"connections": [], "connected": True,
+              "live": {"enabled": True, "median_wait_s": 6.0,
+                       "models": {"on": True, "version": "r5"}}}  # fmt: skip
+    assert " · models r5 · " in view.status_text(status, connected=True, median_s=None,
+                                                  clipboard="off")  # fmt: skip
+    status["live"]["models"] = {"on": False, "why": "no bundle"}
+    assert " · model scores OFF · " in view.status_text(status, connected=True, median_s=None,
+                                                         clipboard="off")  # fmt: skip

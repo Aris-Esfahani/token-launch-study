@@ -5,6 +5,8 @@ Handoff doc for Claude Code. Read fully before writing code.
 **What this is:** a local terminal app that scores brand-new pump.fun tokens and gives instant analysis on any mint the user is looking at in **Padre** (trade.padre.gg / terminal.pump.fun). The human trades manually on Padre. **The agent never places trades and never touches private keys.**
 
 > **Research track** *(2026-11-13, decided by the user)*. The project is now a data science study, not a tool for trading. Its question: **using only a new pump.fun coin's first 30 s to 5 min of on-chain activity, how well can we predict whether it dies, rugs, graduates or doubles, and would any of that survive fees?** The data is the backfilled history (4.1); the deliverable is an honest, reproducible evaluation and write-up. What was built for live use (engine, live signals, screen, local API) stays as a working demo; the rest of the live side (paper trading, real-trade tracking, enrichers, packaging; parts of 1, 3, 11-14) is paused. Build order: 15.3. Evaluation plan: 15.4. Sections that describe the practical track are left as they were, so it can be resumed.
+>
+> *(Added 2026-11-21, step L1; approved by the user.)* One addition to the demo: the engine also scores each new coin with the saved R5 models and the screen shows those scores beside the rules' verdict (15.3, step L1). **Analysis, not advice:** the backtest (R6) found no signal that makes money after costs.
 
 ---
 
@@ -77,7 +79,7 @@ Padre-specific rules:
 - No auto-execution, no private keys, no Padre automation.
 - No reinforcement-learning market simulator.
 - No paid data.
-- *(2026-11-13, research track.)* No further live-tool work (always-on uptime, paper ledger, alerts, packaging) while on the research track; the live recorder's data is used only to describe the live feed, not for training.
+- *(2026-11-13, research track.)* No further live-tool work (always-on uptime, paper ledger, alerts, packaging) while on the research track; the live recorder's data is used only to describe the live feed, not for training. *(Added 2026-11-21, step L1; approved by the user.)* One exception: live model scores as a demo (15.3, step L1).
 
 ---
 
@@ -222,6 +224,7 @@ Every row needs a timestamp so features can be cut off at decision time, plus a 
 **Training snapshots:** one feature snapshot per token at **T+30s, T+60s, T+120s, T+300s** after creation (T = create slot time).
 
 **On-demand analysis:** uses the live state at the moment of the request; record `token_age_s` and pass it to the model as a feature so it matches training.
+- *(Added 2026-11-21, step L1; approved by the user.)* **Model scores are made at the four decision times only.** The models were trained and calibrated at T+30/60/120/300 s and nowhere in between, so an analysis shows the rules' verdict for the current second and the models' scores for each decision time the coin has passed, not a score at its current age.
 
 **Hard rule:** a snapshot at T+k may only use events with `ts <= T+k`. Enrichment fetched after T+k is not allowed for that snapshot unless it is static and known at creation (e.g., metadata URI contents). Write a unit test that fails if any feature reads data past its cutoff.
 
@@ -480,6 +483,8 @@ Never commit `.env`, data, or anyone's keys.
 
 *(Added 2026-11-21, closing R6, research track.)* The backtest (15.3, R6) is `sim/backtest.py` (one simulated trade and its profit or loss), `sim/market.py` (a coin's reserves and fees after every trade, from the backfill), `sim/pool_math.py` (PumpSwap pool math and its check against recorded trades) and `backtest/run.py` + `backtest/report.py` (signals, cuts, the ledger, the report, `agent backtest`; they write `data/backtest/r6/` and `docs/R6_RESULTS.md`). The run code is its own package because nothing under `sim` may import the dataset. There is no `paper_trader.py` on this track.
 
+*(Added 2026-11-21, step L1; approved by the user.)* Live model scores (15.3, L1) are in `scoring/`: `live.py` (loads the saved models, checks them against the manifest, scores one coin), `launch_context.py` (the launch-context signals and how much history is behind them) and `replay_check.py` (live scores against a replay, for `agent check-live`). `export_live.py` (research side, outside `scoring/`) writes the bundle and compares the engine's scoring with R5's on the validation day. `agent check-live` now replays the recording only: read together with the backfill it no longer fits in memory.
+
 ---
 
 ## 14. Packaging and sharing
@@ -583,8 +588,16 @@ This replaces the fast path (15.0). Every step still ends with the tests, its "d
 | **R6** | Backtest as analysis (Phase 11): simulated 1 SOL entries with a 5 s delay (2 s and 10 s tested), exact curve math, recorded fees, the exit plans in `padre_presets.yaml` as test settings | After-cost P&L per signal with delay sensitivity, per day, mayhem vs. ordinary |
 | **R7** | Write-up: question, data, method, results, limits (including the live-feed findings of Phases 1 and 3) | Someone else could reproduce the results from the data and the commands |
 | *optional* | Phase 5 (MemeTrans as a check on the bundle stand-in), Phase 6 (creator and wallet history), 8.7 copycat names (chain-only), stage 4 ranking as analysis | Their "done when" checks in 15.0, where they apply |
+| **L1** *(added 2026-11-21, after R6; approved by the user)* | Live model scores, as a demo (a part of Phase 12): the engine scores every new coin at T+30/60/120/300 s with the saved R5 LightGBM models, and the screen shows the calibrated probabilities beside the rules' verdict. Analysis only: nothing places a trade | Scores saved with every verdict, the model files checked against the R5 manifest; the screen shows each probability beside its usual rate and says when a score is missing and why; live scores equal a replay of the recorded data to the last digit over at least 2 h; a no-lookahead test covers the launch-context signals in their live form; the engine still runs without the research packages |
 
-Paused on this track: steps B (24 h uptime), E (paper ledger), and Phases 7, 12-16, apart from what is already built.
+Paused on this track: steps B (24 h uptime), E (paper ledger), and Phases 7, 12-16, apart from what is already built and step L1.
+
+*(Added 2026-11-21, step L1; approved by the user.)* **How step L1 is run** (evidence in `docs/PROGRESS.md`, "L1: live model scores"):
+- **Which model:** LightGBM without the backfill-only signals (9; 15.4: the ones a live tool can run), for stages 1-3. Logistic regression stays a baseline in the report.
+- **Launch-context signals, live** (15.4: `dev_launches_24h`, `launches_last_hour`, `launch_hour_utc`): counted from the launches on disk (recording and backfill) plus the live feed, using launches strictly before the coin's own (6). In training the history behind them was the unbroken backfill; live it has holes. Each score records the share of the hour and of the 24 hours before the launch that was covered (the recording outside its logged gaps, plus the backfill). Below `live_models.min_hour_covered` (0.95, a setting) of the hour there is no score. Below 100% of the 24 hours the coin is scored and marked: the creator's launch count is then a lower bound.
+- **Who gets a score:** the rows the models were trained on. SOL-paired coins, no recording gap in the coin's life so far, and for stage 2 only coins still on the bonding curve. Everything else gets the reason instead.
+- **The wall (7, 13):** the engine's scoring code (`src/agent/scoring/`) never imports the labels, the dataset or the training code. The calibration maps are stored inside a file that cannot be opened without the training code, so `agent export-live-models` (research side) writes them once as plain numbers to `data/models/r5_live/bundle.json`, with the hash of the file they came from; the engine checks that hash and the LightGBM files against the R5 manifest. The R5 folder is not changed.
+- **Limits, shown on the screen:** the models were trained on Nov 12-16, 2026 and the market drifts (16); the free feed runs late, so a score comes late (16; each shows by how much); R6 found no profitable signal. The usual rates beside the probabilities are the test days' (Nov 18-19), read from the saved report; nothing is scored again on the test days.
 
 ### 15.4 Evaluation plan: research track *(2026-11-13, research track; decide before seeing results; do not loosen later)*
 
@@ -733,3 +746,7 @@ Not used as training data: single Oct 2024 snapshot, aggregator-sourced (survivo
 **2026-11-21, closing R6** (approved by the user; evidence in `docs/PROGRESS.md`, "R6: backtest as analysis"). Marked in place with "closing R6".
 
 28. **Backtest (8.10, 10, 13, 7):** mayhem curve state is the reserves after the last recorded trade (the backfill has no reset records and needs none); results are reported under two views of our own buy, the strict one as the headline; signals buy at cuts fixed on the validation day by picks per hour; the new test settings in `padre_presets.yaml` and `config/backtest.yaml` are named, with Padre's fee at 1% as a test setting; the test days are simulated once; the backtest's files are listed; the labels' note on mayhem entry prices is corrected in wording only. No threshold or "done when" check changed.
+
+**2026-11-21, step L1: live model scores** (approved by the user, who had paused further live work on 2026-11-13; evidence in `docs/PROGRESS.md`, "L1: live model scores"). Marked in place with "step L1".
+
+29. **Live model scores (intro, 2, 6, 13, 15.3):** the engine scores every new coin with the saved R5 LightGBM models and the screen shows the probabilities beside the rules' verdict, as a demo and as analysis only. Scores are made at the four decision times only (6 had them at the coin's current age). The launch-context signals are counted live and each score records how much history was behind them; a short 24-hour history is marked, a short last hour means no score. The scoring code is its own package behind the wall between labels and live code. `agent check-live` replays the recording only. No threshold of the evaluation plan and no earlier "done when" check changed.

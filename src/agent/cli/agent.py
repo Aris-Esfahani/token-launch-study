@@ -828,14 +828,17 @@ def check_live(
     show: Annotated[int, typer.Option(help="List this many differences.")] = 5,
 ) -> None:
     """Check the engine's live verdicts against a replay of the recorded data (spec 15.0
-    step C): each token's signals at each cutoff must be identical."""
+    step C): each token's signals at each cutoff must be identical. Where the verdicts
+    carry model scores (spec 15.3, step L1), those are made again from the recorded data
+    with the same code and must be identical too, to the last digit."""
     # Imported here so this command's code is not loaded by other commands (the backfill's
     # worker processes import this module).
     from collections import Counter
 
     import duckdb
 
-    from agent.features.replay import load_states
+    from agent.features.replay import RECORDED, load_states
+    from agent.scoring.replay_check import disk_history
 
     cfg = load_config()
     folder = cfg.data_dir / "live" / "verdicts"
@@ -843,29 +846,38 @@ def check_live(
         typer.echo("No live verdicts yet. They come from `agentd start` with config/rules.yaml.")
         raise typer.Exit(1)
     since = time.time() - hours * 3600
+    files = f"{folder.as_posix()}/*/*.parquet"
     with duckdb.connect() as db:
+        columns = {row[0] for row in db.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?, union_by_name=true)", [files]).fetchall()}
+        # Verdicts saved before model scores existed have no such column.
+        scores = "scores" if "scores" in columns else "NULL"
         cursor = db.execute(
-            "SELECT mint, ts, created_ts, offset_s, has_gap, snapshot FROM read_parquet(?, "
-            "union_by_name=true) WHERE decided_at >= ? ORDER BY ts",
-            [f"{folder.as_posix()}/*/*.parquet", since],
+            f"SELECT mint, ts, created_ts, offset_s, has_gap, snapshot, {scores}, decided_at "
+            "FROM read_parquet(?, union_by_name=true) WHERE decided_at >= ? ORDER BY ts",
+            [files, since],
         )
         verdicts = cursor.fetchall()
     if not verdicts:
         typer.echo(f"No live verdicts in the last {hours:g} h.")
         raise typer.Exit(1)
     created = [v[2] for v in verdicts]
+    # The recording only: it is what the engine saw. (Read together with the backfill,
+    # every recorded event would first be matched against weeks of history.) Earlier
+    # launches come from everything on disk, as they do when the engine starts.
     replay = load_states(cfg.data_dir, min(created), max(created) + 1,
-                         max_offset_s=max(v[3] for v in verdicts))  # fmt: skip
+                         max_offset_s=max(v[3] for v in verdicts), roots=(RECORDED,))  # fmt: skip
+    history = disk_history(cfg.data_dir)
     states = {s.mint: s for s in replay.states}
     same, differ, missing, gap_flags = 0, [], 0, 0
     keys: Counter = Counter()
-    for mint, ts, _, offset, has_gap, snapshot in verdicts:
+    for mint, ts, _, offset, has_gap, snapshot, _, _ in verdicts:
         state = states.get(mint)
         if state is None:
             missing += 1
             continue
         live = json.loads(snapshot)
-        replayed = state.snapshot(ts, creators=replay.creators)
+        replayed = state.snapshot(ts, creators=history.launches)
         if has_gap != replay.has_gap(state, ts):
             gap_flags += 1
         if live == replayed:
@@ -888,5 +900,80 @@ def check_live(
                    + ", ".join(f"{k} ({n:,})" for k, n in keys.most_common(6)))  # fmt: skip
         for mint, offset, changed in differ[:show]:
             typer.echo(f"    {mint}  T+{offset}s: {', '.join(changed)}")
-    if differ:
+    scores_ok = _check_live_scores(cfg, verdicts, replay, history, show)
+    if differ or not scores_ok:
         raise typer.Exit(1)
+
+
+def _check_live_scores(cfg, verdicts: list[tuple], replay, history, show: int) -> bool:
+    """The model-score half of `check-live`. True when nothing differs."""
+    from agent.scoring.live import ScoringOff, load_scorer
+    from agent.scoring.replay_check import check_scores
+
+    rows = [(mint, ts, offset, has_gap, decided_at, saved)
+            for mint, ts, _, offset, has_gap, _, saved, decided_at in verdicts]  # fmt: skip
+    typer.echo("")
+    if not any(r[5] is not None for r in rows):
+        typer.echo("Model scores: none in these verdicts (the engine made them without the "
+                   "saved models; `agentd status` says why).")  # fmt: skip
+        return True
+    try:
+        scorer = load_scorer(cfg.data_dir,
+                             min_hour_covered=cfg.settings.live_models.min_hour_covered)
+    except ScoringOff as exc:
+        typer.echo(f"Model scores: saved with the verdicts, but they cannot be checked: {exc}")
+        return False
+    got = check_scores(rows, replay, scorer, history)
+    typer.echo(f"Model scores ({scorer.name}, bundle {scorer.bundle_sha}): {got.records:,} "
+               f"verdicts carry a score record; {got.scored:,} with probabilities, "
+               f"{got.records - got.scored:,} without")  # fmt: skip
+    for reason, n in got.reasons.most_common(4):
+        typer.echo(f"    no score ({n:,}): {reason}")
+    share = f" ({got.same / got.compared:.2%})" if got.compared else ""
+    typer.echo(f"  made again from the recorded data: {got.compared:,}, over "
+               f"{got.hours:.2f} h of verdicts")  # fmt: skip
+    typer.echo(f"  identical to the last digit: {got.same:,}{share}")
+    typer.echo(f"  different: {len(got.different):,}")
+    if got.other_model:
+        typer.echo(f"  not compared, made with another model bundle: {got.other_model:,}")
+    if got.gap_flag_differs:
+        typer.echo(f"  not compared, a gap was logged after the verdict: "
+                   f"{got.gap_flag_differs:,}")  # fmt: skip
+    if got.token_missing:
+        typer.echo(f"  not compared, token not in the recorded tokens: {got.token_missing:,}")
+    if got.parts:
+        typer.echo("  parts that differ most often: "
+                   + ", ".join(f"{k} ({n:,})" for k, n in got.parts.most_common(6)))  # fmt: skip
+        for mint, offset, changed in got.different[:show]:
+            typer.echo(f"    {mint}  T+{offset}s: {', '.join(changed)}")
+    return not got.different
+
+
+@app.command("export-live-models")
+def export_live_models(
+    check: Annotated[bool, typer.Option(
+        help="After writing, compare the engine's scoring with R5's own on the validation "
+        "day (never the test days).")] = True,
+) -> None:
+    """Prepare the saved R5 models for the engine (spec 15.3, step L1): write each
+    stage's calibration map as plain numbers to <data folder>/models/r5_live/bundle.json.
+    Nothing in the R5 folder is changed and nothing is scored on the test days. Needs the
+    research packages."""
+    from agent.export_live import check_bundle, export_bundle
+    from agent.models.evaluate import load_plan
+
+    cfg = load_config()
+    try:
+        path = export_bundle(cfg.data_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from None
+    typer.echo(f"Live model bundle written: {path}")
+    if not check:
+        return
+    plan, _ = load_plan(cfg.root / "config" / "evaluation.yaml")
+    result = check_bundle(cfg.data_dir, plan, progress=typer.echo)
+    if not result["ok"]:
+        typer.echo("The engine's scoring does NOT match R5's. Do not use the bundle.")
+        raise typer.Exit(1)
+    typer.echo("The engine's scoring matches R5's to the last digit on every row checked.")

@@ -49,7 +49,8 @@ class AgentScreen(App):
     CSS = """
     #alerts { height: 1fr; border: round $accent; }
     #input { margin: 0 0; }
-    #analysis { height: auto; min-height: 9; border: round $secondary; padding: 0 1; }
+    #analysis { height: auto; min-height: 9; max-height: 60%; overflow-y: auto;
+                border: round $secondary; padding: 0 1; }
     #status { height: 1; padding: 0 1; background: $panel; }
     """
     BINDINGS = [
