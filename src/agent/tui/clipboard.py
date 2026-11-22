@@ -9,6 +9,10 @@ clipboard while the browser is copying.
 Privacy: the clipboard can hold anything, including keys a wallet app copied. Text that
 is not exactly one address is dropped at once: never stored, logged or sent anywhere.
 Text longer than any address is not even read.
+
+The screen also writes to the clipboard in one case: when you click a coin in its list,
+that coin's address is copied, ready to paste into Padre's search (spec 12.1). Nothing
+else is ever written.
 """
 
 from __future__ import annotations
@@ -37,11 +41,14 @@ class ClipboardSource(Protocol):
 
     def text(self) -> str | None: ...
 
+    def copy(self, text: str) -> object: ...  # true if the text is on the clipboard now
+
 
 class WindowsClipboard:
     """Windows' clipboard through its own API (user32/kernel32), no extra package."""
 
     CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
 
     def __init__(self) -> None:
         import ctypes
@@ -64,6 +71,13 @@ class WindowsClipboard:
         kernel32.GlobalUnlock.restype = wintypes.BOOL
         kernel32.GlobalSize.argtypes = [wintypes.HGLOBAL]
         kernel32.GlobalSize.restype = ctypes.c_size_t
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalFree.restype = wintypes.HGLOBAL
         self._user32, self._kernel32 = user32, kernel32
 
     def sequence(self) -> int:
@@ -93,6 +107,34 @@ class WindowsClipboard:
                 return self._ctypes.wstring_at(pointer, size // 2).split("\0", 1)[0]
             finally:
                 kernel32.GlobalUnlock(handle)
+        finally:
+            user32.CloseClipboard()
+
+    def copy(self, text: str) -> bool:
+        """Put `text` on the clipboard. False if Windows would not let us."""
+        user32, kernel32 = self._user32, self._kernel32
+        data = text.encode("utf-16-le") + b"\0\0"
+        for _ in range(5):  # another program may have it open for a moment
+            if user32.OpenClipboard(None):
+                break
+            time.sleep(0.01)
+        else:
+            return False
+        try:
+            handle = kernel32.GlobalAlloc(self.GMEM_MOVEABLE, len(data))
+            if not handle:
+                return False
+            pointer = kernel32.GlobalLock(handle)
+            if not pointer:
+                kernel32.GlobalFree(handle)
+                return False
+            self._ctypes.memmove(pointer, data, len(data))
+            kernel32.GlobalUnlock(handle)
+            user32.EmptyClipboard()
+            if not user32.SetClipboardData(self.CF_UNICODETEXT, handle):
+                kernel32.GlobalFree(handle)  # ours again: Windows did not take it
+                return False
+            return True
         finally:
             user32.CloseClipboard()
 
@@ -144,3 +186,17 @@ class ClipboardWatcher:
         self._last_mint = mint
         self.changed_at = time.perf_counter()
         return mint
+
+    def copy(self, mint: str) -> bool:
+        """Put a coin's address on the clipboard (the user clicked that coin). The
+        watcher does not report its own copy. Only an address is ever written."""
+        if self.source is None or not is_address(mint):
+            return False
+        try:
+            done = bool(self.source.copy(mint))
+        except OSError:
+            done = False
+        self._last_sequence = self.source.sequence()
+        if done:
+            self._last_mint = mint
+        return done

@@ -37,7 +37,7 @@ verdict, D screen, E paper ledger; the full backfill (Phase 4) runs in the backg
 | A. Close Phases 1 and 3 | Done 2026-11-13: both closed with the user's OK | See "Phase 1" and "Phase 3" below. |
 | B. Engine always on | **Built 2026-11-12 in a separate copy (branch `step-b`); paused 2026-11-13** | Two live connections, gap log for several connections, continuous recording, uptime in `agentd status`. The 24-hour uptime test is not needed on the research track. Results in "Step B" below. |
 | C. Live signals + rules verdict | **Built 2026-11-12 (branch `step-b`)** | The engine judges every new token at T+30/60/120/300 s; `agent check-live` compares live with replay. The same feature code builds the research dataset (R2). Results in "Step C" below. |
-| D. Screen | **Built 2026-11-12 (branch `step-b`); kept as a demo** | `agent screen`: alert feed, paste box, clipboard watcher, status bar; the engine answers over a local connection. Results in "Step D" below. |
+| D. Screen | **Built 2026-11-12 (branch `step-b`); kept as a demo** | `agent screen`: alert feed, paste box, clipboard watcher, status bar; the engine answers over a local connection. Results in "Step D" below. Minimal plain-English layout done 2026-11-22 (user OK'd; "Screen: minimal layout" below). |
 | E. Paper ledger | Paused 2026-11-13 (research track) | `padre_presets.yaml` is kept as settings for the R6 backtest. |
 
 ## L1: live model scores (demo, built 2026-11-21)
@@ -202,6 +202,39 @@ recorded-history shares are the same live and replayed.
 The engine was left running on this branch's code (started from the worktree folder, with
 a `.env` there that holds only `DATA_DIR`). After this branch is brought into the main
 folder, restart it from there: `agentd stop`, then `agentd start`.
+
+## Screen: minimal layout in plain English (built and closed 2026-11-22)
+
+Asked for by the user on 2026-11-22: a screen that is "super easy and minimal", in plain
+English, with the coin's name in the list at the top. The user chose, from two questions
+with mock-ups: the list keeps only coins that pass the rules, and the address leaves the
+list and is copied when a coin is clicked. Spec 1 and 12.1 are noted (change-log entry 30).
+**Closed 2026-11-22 with the user's OK** (after pictures of the screen with sample coins
+and against the running engine). Screen only: the engine is unchanged and was not restarted.
+
+What changed (`tui/view.py`, `tui/app.py`, `tui/clipboard.py`):
+- **List:** one line per coin, by name: `Lazy Otter ($OTTER) · 2 min old · looked OK at
+  1 min · 25 buyers · worth 32 SOL`. Before, each check had its own line starting with the
+  time and the 44-character address. A later check of a coin updates its line; ages are
+  brought up to date every 5 s.
+- **Click:** shows the details and copies the coin's address (Windows clipboard, no extra
+  package). The watcher does not react to its own copy. Only an address is ever written.
+- **Details:** the verdict in words, three sentences, the models' newest guess with its
+  usual rates and limits, the address. F3 (or `more`) shows every number as before.
+- **Status bar:** what is on, then only what is wrong, and the median answer time.
+
+| Check | Result |
+|---|---|
+| Tests | 414 pass (3 new, the screen's others rewritten for the new text), ruff clean |
+| Real clipboard | On this PC: the address was copied, Windows read it back, the watcher did not report its own copy, other text was refused. The earlier clipboard text was put back |
+| The app in a test | A real screen against a fake engine: one line per coin, the age counts up, a click copies the address and shows the details, F3 switches to every number and back, copy-to-verdict under 2 s |
+| Seen on the real engine | Nov 22, about 1 AM PST: the new screen, run without a window, connected to the running engine: 42 coins in the list by name, a click showed a live coin's details with its model guess and copied its address (to a stand-in clipboard). Not yet looked at in a real terminal window by the user |
+
+Limits kept honest in the short view: when the models were trained, that the backtest
+found no signal that makes money, a score that came 10 s late or more, and a short
+creator history. The four decision times one by one are only in the every-number view.
+A coin's line says "looked OK at 1 min": the list is not told when a coin stops passing
+(the engine sends only passes), so the line names the check it comes from.
 
 ## R6: backtest as analysis (research track, built and closed 2026-11-21)
 

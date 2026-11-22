@@ -157,7 +157,8 @@ What to know when reading a score:
   full 24 hours the coin is scored and marked, because the creator's count is then a
   lower bound. After a fresh start, scores begin about an hour in.
 - The free live feed often runs 5 to 77 seconds late, and a score waits for its data, so
-  a "T+30 s" score can arrive a minute after launch. Each one shows how late it came.
+  a "T+30 s" score can arrive a minute after launch. The screen says so when a score
+  came 10 seconds late or more, and the every-number view (F3) always shows the delay.
 
 `agent check-live` also makes the saved scores again from the recorded data with the same
 code; they must be identical to the last digit.
@@ -170,27 +171,50 @@ code; they must be identical to the last digit.
 
 The window to keep beside Padre while you trade. It needs the engine running.
 
-- **Alerts** (top): every token that passes the rules, as it happens, mint first. Click
-  one (or pick it with the arrow keys and press Enter) to analyze it.
-- **Analyze** (middle): copy a coin's mint in Padre and its analysis appears by itself
-  (the clipboard watcher), or paste a mint into the box and press Enter. A coin's
-  bonding-curve address works too; the panel then shows its mint first. You get the
-  verdict with its reasons, the main signals (buyers, holders, top 10, dev, snipers,
-  buy/sell flow), its verdicts so far, and how old the data is. Below that, the models'
-  scores at each of the four moments the coin has passed, each beside its usual rate
-  (how often that outcome happened on the test days for the same moment and kind of
-  coin), for example `bad 97% (usual 87%)`, or the reason there is no score.
-- **Status** (bottom): feeds, how far behind the data is, the last gap, and how long
-  copy-to-verdict takes (the median).
+It is minimal and in plain English:
 
-Commands in the box: a mint, `mute <mint>` / `unmute <mint>`, `clipboard` (or F2) to
-turn the watcher on and off, `start` to start the engine, `help`, `quit`. Closing the
-screen does not stop the engine.
+```
+NEW COINS that look OK · click one for details
+  Lazy Otter ($OTTER) · 2 min old · looked OK at 1 min · 25 buyers · worth 32 SOL
+
+DETAILS
+  Lazy Otter ($OTTER) · 2 min old · data from 2 sec ago
+  LOOKS OK: no warning sign so far
+    25 people bought it. The 10 biggest holders own 22%.
+    The creator holds 3% and has not sold.
+    Worth about 32 SOL, 12% of the way to graduating.
+  The model's guess at 30 sec (analysis, not advice):
+    goes bad 81% (usually 87%) · graduates later 2.1% (usually 1.1%) · doubles before halving 6.1% (usually 2.4%)
+    Trained on Nov 12-16, 2026. In the backtest, no signal made money after costs.
+  Address (copied, paste it in Padre): <the coin's address>
+
+Engine on · data 1 sec behind · model scores on · clipboard watching on (F2)
+```
+
+- **New coins** (top): every coin that passes the rules, one line each, by its name. The
+  age keeps counting, and a later check of the same coin updates its line. Click a coin
+  (or pick it with the arrow keys and press Enter) to see its details; **its address is
+  copied**, ready to paste into Padre's search.
+- **Details** (middle): also shown when you copy a coin's address in Padre (the
+  clipboard watcher), or paste one into the box and press Enter. A coin's bonding-curve
+  address works too. You get the rules' verdict in words with its reasons, three
+  sentences of facts, and the models' newest guess, each number beside how often that
+  outcome usually happened (on the test days, for the same moment and kind of coin), or
+  the reason there is no guess. **F3** switches to every number (buyers, holders, top
+  10, dev, snipers, buy/sell flow, the scores at each of the four moments) and back.
+- **Status** (bottom): what is on, how far behind the data is, then only what is wrong
+  (a feed down, not recording, checks running late, the last interruption), and how
+  fast the screen answers (the median).
+
+Commands in the box: an address, `more` (or F3), `mute <address>` / `unmute <address>`,
+`clipboard` (or F2) to turn the watcher on and off, `start` to start the engine, `help`,
+`quit`. Closing the screen does not stop the engine.
 
 The clipboard watcher only reacts to text that is exactly one Solana address. Anything
 else on the clipboard is ignored and never stored, logged or sent anywhere, and long
-text is not even read. Only coins launched while the engine runs, and in the last 15
-minutes, can be analyzed.
+text is not even read. The only thing the screen ever writes to the clipboard is the
+address of a coin you clicked. Only coins launched while the engine runs, and in the
+last 15 minutes, can be looked up.
 
 The screen talks to the engine over a local connection (`local_api.port` in
 `config/settings.yaml`, 8765). It listens on this PC only and refuses web pages.

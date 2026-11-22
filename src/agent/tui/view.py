@@ -1,9 +1,12 @@
 """What the screen shows, as plain text lines (the app adds colours). Kept apart from the
 app so it can be tested without a terminal.
 
-Every line about a coin starts with its mint, so it can be pasted into Padre's search
-(spec 1). Names and symbols come from whoever launched the coin, so they are cleaned:
-control characters are dropped and the length is capped.
+The screen is minimal and in plain English (spec 12.1, note of 2026-11-22): a coin is
+shown by its name, with a few facts in sentences. Its address is in the details panel,
+ready for Padre's search (spec 1). `analysis_lines(..., full=True)` gives every number,
+address first, as the screen showed them before. Names and symbols come from whoever
+launched the coin, so they are cleaned: control characters are dropped and the length is
+capped.
 
 Model scores (spec 15.3, step L1) are analysis, not advice: every probability is shown
 beside the outcome's usual rate, with how late it came, and the panel always says when
@@ -15,9 +18,15 @@ from __future__ import annotations
 from agent import clock
 
 LEVEL_STYLE = {"pass": "bold green", "caution": "yellow", "avoid": "red", "error": "magenta"}
+# The rules' verdict in plain words.
+LEVEL_WORDS = {"pass": "looks OK", "caution": "be careful", "avoid": "avoid"}
 MAX_LABEL = 20
+MAX_NAME = 28
+LATE_S = 10  # a verdict or score that waited this long for its data is called late
 # The models' stages in plain words (a stage not named here is shown by its name).
 STAGE_WORDS = {"bad": "bad", "grad_later": "graduates later", "hit_2x": "2x before half"}
+PLAIN_STAGE_WORDS = {"bad": "goes bad", "grad_later": "graduates later",
+                     "hit_2x": "doubles before halving"}  # fmt: skip
 
 
 def clean(text: object, limit: int = MAX_LABEL) -> str:
@@ -47,23 +56,49 @@ def _symbol(item: dict) -> str:
     return f"${symbol}" if symbol else "$?"
 
 
-def alert_text(alert: dict) -> str:
-    """One line of the alert feed: time, mint, symbol, when, verdict, key signals."""
+def coin_name(item: dict) -> str:
+    """The coin as its launcher named it: "Name ($SYMBOL)", or what there is of it."""
+    name, symbol = clean(item.get("name"), MAX_NAME), clean(item.get("symbol"), 12)
+    if name and symbol:
+        return f"{name} (${symbol})"
+    return name or (f"${symbol}" if symbol else "(no name)")
+
+
+def how_long(seconds: float | None) -> str:
+    """A length of time in words: "45 sec", "2 min", "3 h"."""
+    if seconds is None:
+        return "?"
+    seconds = max(int(seconds), 0)
+    if seconds < 60:
+        return f"{seconds} sec"
+    if seconds < 3600:
+        return f"{seconds // 60} min"
+    return f"{seconds // 3600} h"
+
+
+def _people(n: int, one: str = "buyer", many: str = "buyers") -> str:
+    return f"{n:,} {one if n == 1 else many}"
+
+
+def alert_text(alert: dict, now: float | None = None) -> str:
+    """One coin in the list at the top: its name, how old it is at `now`, what the rules
+    said and when, and two facts. No address: the details panel has it."""
     s = alert.get("signals") or {}
-    parts = [
-        f"mc {_num(s.get('market_cap_sol'), '.0f', ' SOL')}",
-        f"curve {_num(s.get('curve_progress_pct'), '.0f', '%')}",
-        f"{_num(s.get('unique_buyers'), '.0f')} buyers",
-        f"top10 {_num(s.get('top10_hold_pct'), '.0f', '%')}",
-        f"dev {_num(s.get('dev_hold_pct'), '.0f', '%')}",
-    ]
-    late = f", {alert['wait_s']:.0f}s late" if alert.get("wait_s", 0) >= 10 else ""
-    gap = "  (data incomplete: recording gap)" if alert.get("has_gap") else ""
-    at = clock.clock(alert["decided_at"], seconds=True)
-    return (
-        f"{at:>11s}  {alert['mint']}  {_symbol(alert)}  T+{alert['offset_s']}s  "
-        f"{alert['level'].upper()}{late}  {' · '.join(parts)}{gap}"
-    )
+    parts = [coin_name(alert)]
+    created = alert.get("created_ts")
+    if now is not None and created is not None:
+        parts.append(f"{how_long(now - created)} old")
+    level = alert.get("level", "")
+    at = how_long(alert.get("offset_s"))
+    parts.append(f"looked OK at {at}" if level == "pass"
+                 else f"{LEVEL_WORDS.get(level, level)} at {at}")  # fmt: skip
+    if s.get("unique_buyers") is not None:
+        parts.append(_people(int(s["unique_buyers"])))
+    if s.get("market_cap_sol") is not None:
+        parts.append(f"worth {s['market_cap_sol']:.0f} SOL")
+    if alert.get("has_gap"):
+        parts.append("some data missing")
+    return " · ".join(parts)
 
 
 def _pct(share: float | None) -> str:
@@ -140,13 +175,103 @@ def model_lines(a: dict) -> list[str]:
     return lines
 
 
-def analysis_lines(a: dict) -> list[str]:
-    """The analysis panel for one mint. Line 2 is always the verdict (or why there is
-    none), so the app can colour it."""
+def plain_model_lines(a: dict) -> list[str]:
+    """The models' newest scores in a few plain lines, always with their limits. Empty
+    for an engine that does not know about model scores."""
+    models = a.get("models")
+    if models is None:
+        return []
+    if not models.get("on"):
+        return [f"No model guess: model scores are off ({models.get('why')})"]
+    history = a.get("verdicts") or []
+    if not history:
+        return ["No model guess yet (the first comes when the coin is 30 sec old)"]
+    newest = history[-1]
+    at = how_long(newest.get("offset_s"))
+    scores = newest.get("scores")
+    if not scores:
+        return [f"No model guess at {at} (the models were not on then)"]
+    if "p" not in scores:
+        return [f"No model guess at {at}: {scores.get('why')}"]
+    usual = newest.get("usual") or {}
+    missing = scores.get("missing") or {}
+    parts = []
+    for stage in models.get("stages") or []:
+        name = stage["name"]
+        words = PLAIN_STAGE_WORDS.get(name, name)
+        if name in scores["p"]:
+            parts.append(f"{words} {_pct(scores['p'][name])} (usually {_pct(usual.get(name))})")
+        else:
+            parts.append(f"{words}: no guess ({missing.get(name, 'no score')})")
+    late = newest.get("wait_s")
+    lines = [
+        f"The model's guess at {at} (analysis, not advice"
+        + (f"; it came {late:.0f} sec late" if late is not None and late >= LATE_S else "") + "):",
+        "  " + " · ".join(parts),
+        f"  Trained on {_days(models.get('trained_days'))}. In the backtest, no signal made "
+        "money after costs.",
+    ]  # fmt: skip
+    context = scores.get("context") or {}
+    covered = context.get("day_covered")
+    if covered is not None and covered < 1:
+        lines.append(
+            f"! The creator's coin count ({context.get('dev_launches_24h')}) may be too low: "
+            f"only {covered:.0%} of the day before the launch was recorded")
+    return lines
+
+
+def _plain_lines(a: dict, copied: bool) -> list[str]:
+    s = a["snapshot"]
+    reasons = "; ".join(a["reasons"]) if a["reasons"] else "no warning sign so far"
+    buyers = s["unique_buyers"]
+    bought = "1 person bought it" if buyers == 1 else f"{buyers:,} people bought it"
+    if not s.get("dev_buy_pct"):
+        creator = "The creator has not bought any."
+    else:
+        dev_sold = s.get("dev_sold_pct")
+        sold = ("has not sold" if not dev_sold
+                else f"has sold {dev_sold:.0f}% of what they bought")  # fmt: skip
+        creator = f"The creator holds {s['dev_hold_pct']:.0f}% and {sold}."
+    prior = s.get("dev_prior_launches")
+    if prior:
+        creator += f" They launched {prior:,} coin{'' if prior == 1 else 's'} before (that we saw)."
+    worth = s.get("market_cap_sol")
+    money = "Not priced in SOL" if worth is None else f"Worth about {worth:.0f} SOL"
+    if s.get("completed"):
+        curve = f"{money}. It has graduated (left the bonding curve)."
+    else:
+        curve = f"{money}, {s['curve_progress_pct']:.0f}% of the way to graduating."
+    lines = [
+        f"{coin_name(a)} · {how_long(s['token_age_s'])} old · data from "
+        f"{how_long(a['data_age_s'])} ago",
+        f"{LEVEL_WORDS.get(a['level'], a['level']).upper()}: {reasons}",
+        f"  {bought}. The 10 biggest holders own {s['top10_hold_pct']:.0f}%.",
+        f"  {creator}",
+        f"  {curve}",
+    ]
+    lines += plain_model_lines(a)
+    if a.get("copied") not in (None, a["mint"]):
+        lines.append("! You copied the coin's trading address; this is the coin it belongs to")
+    if a.get("has_gap"):
+        lines.append("! Some of this coin's data is missing (the recording was interrupted)")
+    if s.get("is_mayhem"):
+        lines.append("! Mayhem coin: pump.fun's own bot trades it")
+    lines.append(("Address (copied, paste it in Padre): " if copied else "Address: ") + a["mint"])
+    return lines
+
+
+def analysis_lines(a: dict, *, full: bool = False, copied: bool = False) -> list[str]:
+    """The details panel for one coin. Line 2 is always the verdict (or why there is
+    none), so the app can colour it. The default is a few plain sentences; `full` gives
+    every number, address first. `copied`: the screen put the address on the clipboard."""
     if a.get("op") == "error":
         return [a.get("mint") or "", f"could not analyze: {a.get('error')}"]
     if not a.get("known"):
         return [a["mint"], f"not tracked: {a.get('why')}"]
+    return _full_lines(a) if full else _plain_lines(a, copied)
+
+
+def _full_lines(a: dict) -> list[str]:
     s = a["snapshot"]
     name = clean(a.get("name"))
     head = [
@@ -201,36 +326,38 @@ def status_text(
     median_s: float | None,
     clipboard: str,
 ) -> str:
-    """The status bar: engine, feed, rates, verdict delay, copy-to-verdict time."""
+    """The status bar in plain words: is the engine on, how fresh is the data, are model
+    scores on; then only what is wrong, and how fast the screen answers."""
     if not connected:
-        return f"engine offline: type `start` (or run `agentd start`) · clipboard {clipboard}"
+        return f"Engine off: type start (or run `agentd start`) · clipboard {clipboard}"
     if not status:
-        return f"engine connected, waiting for its status · clipboard {clipboard}"
+        return f"Engine on, waiting for its status · clipboard {clipboard}"
+    parts = ["Engine on"]
     feeds = status.get("connections") or []
     up = sum(1 for c in feeds if c.get("connected"))
+    if (feeds and up == 0) or (not feeds and not status.get("connected")):
+        parts.append("FEED DOWN")
+    elif up < len(feeds):
+        parts.append(f"{up} of {len(feeds)} feeds up")
     lag = status.get("covered_lag_s")
-    parts = [
-        f"feeds {up}/{len(feeds)} up" if feeds else
-        ("feed connected" if status.get("connected") else "feed DOWN"),
-        f"data {_num(lag, '.0f', 's')} behind",
-        f"{status.get('creates_per_hr', '-'):,} tokens/hr"
-        if isinstance(status.get("creates_per_hr"), int) else "tokens/hr -",
-    ]  # fmt: skip
+    if lag is not None:
+        parts.append(f"data {lag:.0f} sec behind")
     live = status.get("live") or {}
     if live.get("enabled"):
         wait = live.get("median_wait_s")
-        parts.append(f"verdicts {_num(wait, '.0f', 's')} late")
+        if wait is not None and wait >= LATE_S:
+            parts.append(f"checks run {wait:.0f} sec late")
     elif live:
-        parts.append("verdicts OFF")
+        parts.append("rule checks OFF")
     models = live.get("models")
     if models is not None:
-        parts.append(f"models {models.get('version', 'on')}" if models.get("on")
-                     else "model scores OFF")  # fmt: skip
+        parts.append("model scores on" if models.get("on") else "model scores OFF")
     if not status.get("recording", True):
         parts.append("NOT RECORDING")
     gap = status.get("last_gap")
     if gap:
-        parts.append(f"last gap {clock.clock(gap['at'])} ({gap['seconds']}s)")
-    parts.append(f"copy-to-verdict {_num(median_s, '.2f', 's')}")
+        parts.append(f"last interruption {clock.clock(gap['at'])} ({gap['seconds']} sec)")
+    if median_s is not None:
+        parts.append(f"answers in {median_s:.2f} sec")
     parts.append(f"clipboard {clipboard}")
     return " · ".join(parts)

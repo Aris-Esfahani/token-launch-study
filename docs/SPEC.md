@@ -47,7 +47,7 @@ sets TP / SL / limit orders
 ```
 
 Padre-specific rules:
-- **Mint address first** in every alert and analysis, so it can be pasted straight into Padre's search.
+- **Mint address first** in every alert and analysis, so it can be pasted straight into Padre's search. *(Updated 2026-11-22, minimal screen; approved by the user.)* On the screen a coin is shown by its name instead, and clicking it in the list copies its mint for Padre's search (12.1). The alerts log, `agentd alerts` and the screen's "every number" view keep the mint first.
 - **Mirror Padre's mental model:** show the same kinds of signals Padre's Trenches filters use (liquidity/curve progress, holder growth, dev history, insider/top-holder concentration, bundles), so the user can cross-check the agent against Padre's screen.
 - **Exit rules in backtests and paper trading mirror the user's Padre settings** (take-profit, stop-loss, time stop, slippage, priority fee). Keep them in `config/padre_presets.yaml`.
 - **Do not automate, scrape, or reverse-engineer Padre's UI or private endpoints.** It has no public API, it can break without warning, and it risks the user's account. All data comes from the chain and public APIs.
@@ -417,6 +417,12 @@ About a fifth of new coins are in pump.fun's mayhem mode: pump.fun's own agent w
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+*(Added 2026-11-22, minimal screen; approved by the user.)* **The screen is minimal and in plain English.** The layout above stays (list, paste box, details, status), with these changes:
+- **List:** one line per coin, by its name: `Name ($SYMBOL) · 2 min old · looked OK at 1 min · 25 buyers · worth 32 SOL`. No address in the line. A later check of the same coin updates its line, and the age keeps counting. The list still holds only coins that pass the rules.
+- **Click a coin:** its details are shown and its mint is copied to the clipboard, ready for Padre's search. This is the only thing the screen ever writes to the clipboard, and it does not touch Padre.
+- **Details:** the rules' verdict in words (LOOKS OK / BE CAREFUL / AVOID, with the reasons), three sentences of facts, the models' newest scores each beside its usual rate with their limits (when trained, no signal made money in the backtest, a late score, a short creator history), then the mint. F3 switches to every number as before, mint first.
+- **Status:** what is on (engine, data delay, model scores), then only what is wrong, and the median copy-to-verdict time (12.5).
+
 ### 12.2 Two-stage on-demand analysis
 1. **Fast reply (target < 1-2s):** read live state from memory → score with loaded models → show scores + top reasons. No network calls.
 2. **Enrichment reply (a few seconds):** RugCheck, missing wallet-funding lookups, website/socials check, optional LLM take. Runs in parallel and updates the panel when ready.
@@ -750,3 +756,7 @@ Not used as training data: single Oct 2024 snapshot, aggregator-sourced (survivo
 **2026-11-21, step L1: live model scores** (approved by the user, who had paused further live work on 2026-11-13; evidence in `docs/PROGRESS.md`, "L1: live model scores"). Marked in place with "step L1".
 
 29. **Live model scores (intro, 2, 6, 13, 15.3):** the engine scores every new coin with the saved R5 LightGBM models and the screen shows the probabilities beside the rules' verdict, as a demo and as analysis only. Scores are made at the four decision times only (6 had them at the coin's current age). The launch-context signals are counted live and each score records how much history was behind them; a short 24-hour history is marked, a short last hour means no score. The scoring code is its own package behind the wall between labels and live code. `agent check-live` replays the recording only. No threshold of the evaluation plan and no earlier "done when" check changed.
+
+**2026-11-22, minimal screen** (asked for and approved by the user; evidence in `docs/PROGRESS.md`, "Screen: minimal layout"). Marked in place with "minimal screen".
+
+30. **Minimal screen (1, 12.1):** the screen shows a coin by its name and says things in plain English: one line per coin in the list, a few sentences in the details, a short status bar. The mint is no longer first on the screen (1 had it first in every alert and analysis): it is in the details, and clicking a coin copies it for Padre's search. Every number, mint first, is one key away (F3). The alerts log and `agentd alerts` are unchanged.
