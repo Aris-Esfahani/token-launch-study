@@ -1,4 +1,4 @@
-# Memecoin signal agent
+# Token launch study
 
 A data science study of brand-new pump.fun coins: using only a coin's first 30 seconds to
 5 minutes of on-chain activity, how well can we predict whether it dies, rugs, graduates
