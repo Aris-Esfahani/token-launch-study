@@ -8,7 +8,7 @@ for trading on Padre; that live tool still works as a demo. Design:
 
 **Not financial advice.** This is a high-risk market. The agent only analyzes and alerts.
 
-Built with [Claude Code](https://claude.com/claude-code), Anthropic's coding agent.
+Built with Claude Code
 
 ## Rules this project never breaks
 
